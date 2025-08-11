@@ -17,7 +17,7 @@ import json
 import logging
 import random
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from functools import cache
 from io import BytesIO
@@ -72,7 +72,7 @@ class SampleRequest:
     prompt_len: int
     expected_output_len: int
     multi_modal_data: Optional[
-        Union[MultiModalDataDict, dict, list[dict]]
+        Union[MultiModalDataDict, dict, list[dict], list[Mapping[str, Any]]]
     ] = None
     lora_request: Optional[LoRARequest] = None
 
@@ -517,6 +517,211 @@ class RandomDataset(BenchmarkDataset):
         total_input_len = len(re_encoded_sequence)
 
         return prompt, total_input_len
+
+
+# -----------------------------------------------------------------------------
+# MultiModalDataset Implementation
+# -----------------------------------------------------------------------------
+   
+
+class RandomMultiModalDataset(RandomDataset):
+    """
+    Random multimodal dataset that generates synthetic images with random
+    text.
+
+    This class is used for generating requests with random dimensions and
+    number of images. Images are in base64 format; `multi_modal_data` is a
+    list of dicts. It shouldn't be used for generating requests on the fly,
+    but rather for generating a dataset. Hence, it is not optimized for
+    speed, but rather for ease of use.
+    """
+
+    IS_MULTIMODAL = True
+    DEFAULT_HEIGHT = 224
+    DEFAULT_WIDTH = 224
+    DEFAULT_NUM_IMAGES = 1
+    DEFAULT_NUM_IMAGES_RANGE_RATIO = 0.0
+    DEFAULT_DIMENSION_RANGE_RATIO = 0.0
+    DEFAULT_ENABLE_MULTIMODAL_CHAT = False
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+
+
+    def generate_synthetic_image(self, width: int, height: int) -> Image.Image:
+        """Generate synthetic PIL image with random RGB values."""
+        random_pixels = self._np_rng.integers(
+            0,
+            256,
+            (height, width, 3),
+            dtype=np.uint8,
+        )
+        return Image.fromarray(random_pixels)
+
+    def get_image_sampling_params(
+        self,
+        num_images_range_ratio: float,
+        dimension_range_ratio: float,
+        width: int,
+        height: int,
+        num_images: int,
+    ) -> tuple[int, int, int, int, int, int]:
+        """
+        Get the sampling parameters for the image dimensions.
+        """
+        # Enforce num_images_range_ratio < 1
+        assert num_images_range_ratio < 1.0, (
+            "num_images_range_ratio must be < 1.0 to ensure a valid sampling "
+            "range"
+        )
+        max_num_images = int(num_images * (1 + num_images_range_ratio))
+        # ensure min num images is zero
+        min_num_images = max(int(num_images * (1 - num_images_range_ratio)), 0)
+        # Enforce dimension_range_ratio < 1
+        assert dimension_range_ratio < 1.0, (
+            "dimension_range_ratio must be < 1.0 to ensure a valid sampling "
+            "range"
+        )
+        min_width = int(width * (1 - dimension_range_ratio))
+        max_width = int(width * (1 + dimension_range_ratio))
+        min_height = int(height * (1 - dimension_range_ratio))
+        max_height = int(height * (1 + dimension_range_ratio))
+        return (
+            min_num_images,
+            max_num_images,
+            min_width,
+            max_width,
+            min_height,
+            max_height,
+        )
+
+    def get_image_dimensions_iterator(
+        self,
+        min_num_images: int,
+        max_num_images: int,
+        min_width: int,
+        max_width: int,
+        min_height: int,
+        max_height: int,
+    ) -> Iterator[tuple[int, int]]:
+        """
+        Iterator over the image dimensions for each request
+        whose size is between min_num_images and max_num_images.
+        """
+        request_num_images = int(
+            self._np_rng.integers(min_num_images, max_num_images + 1)
+        )
+        for _ in range(request_num_images):
+            yield (
+                int(self._np_rng.integers(min_width, max_width) + 1),
+                int(self._np_rng.integers(min_height, max_height) + 1),
+            )
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        prefix_len: int = RandomDataset.DEFAULT_PREFIX_LEN,
+        range_ratio: float = RandomDataset.DEFAULT_RANGE_RATIO,
+        input_len: int = RandomDataset.DEFAULT_INPUT_LEN,
+        output_len: int = RandomDataset.DEFAULT_OUTPUT_LEN,
+        width: int = DEFAULT_WIDTH,
+        height: int = DEFAULT_HEIGHT,
+        num_images: int = DEFAULT_NUM_IMAGES,
+        num_images_range_ratio: float = DEFAULT_NUM_IMAGES_RANGE_RATIO,
+        dimension_range_ratio: float = DEFAULT_DIMENSION_RANGE_RATIO,
+        enable_multimodal_chat: bool = DEFAULT_ENABLE_MULTIMODAL_CHAT,
+        **kwargs,
+    ) -> list[SampleRequest]:
+        """
+        Standard sample method compatible with serve.py and other datasets.
+        Returns OpenAI API format for compatibility with serve.py.
+
+        Args:
+            tokenizer: The tokenizer to use for processing
+            num_requests: Number of requests to generate
+            width: Image width in pixels
+            height: Image height in pixels
+            num_images: Number of images per request
+            num_images_range_ratio: Relative half-width of the sampling
+                interval for number of images.
+            dimension_range_ratio: Relative half-width of the sampling
+                interval for image dimensions.
+            enable_multimodal_chat: Whether to apply multimodal chat
+                transformation
+            **kwargs: Additional arguments passed to parent sample method
+
+        Returns:
+            List of SampleRequest objects with properly formatted OpenAI
+            multimodal data.
+        """
+        input_lens, output_lens, offsets = self.get_sampling_params(
+            num_requests, range_ratio, input_len, output_len, tokenizer
+        )
+
+        (
+            min_num_images,
+            max_num_images,
+            min_width,
+            max_width,
+            min_height,
+            max_height,
+        ) = self.get_image_sampling_params(
+            num_images_range_ratio,
+            dimension_range_ratio,
+            width,
+            height,
+            num_images,
+        )
+
+        # Generate prefix once
+        prefix_token_ids = self.get_prefix(tokenizer, prefix_len)
+        vocab_size = tokenizer.vocab_size
+        # Add synthetic images to each request
+        mm_requests = []
+        for i in range(num_requests):
+            prompt, total_input_len = self.generate_token_sequence(
+                tokenizer=tokenizer,
+                prefix_token_ids=prefix_token_ids,
+                prefix_len=prefix_len,
+                vocab_size=vocab_size,
+                input_len=int(input_lens[i]),
+                offset=int(offsets[i]),
+                index=i,
+            )
+            # Get image dimension iterator for a given request
+            image_dimensions_iterator = self.get_image_dimensions_iterator(
+                min_num_images,
+                max_num_images,
+                min_width,
+                max_width,
+                min_height,
+                max_height,
+            )
+            # Create synthetic images
+            # The process_image returns
+            # {"type": "image_input", "image_url": f"{base64_image}"}
+            # This follows the OpenAI API chat completions
+            # https://github.com/openai/openai-python
+            mm_content = [
+                process_image(
+                    self.generate_synthetic_image(width, height)
+                )
+                for width, height in image_dimensions_iterator
+            ]
+            # TODO: Handle multimodal chat transformation
+            if enable_multimodal_chat:
+                pass
+            mm_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=total_input_len,
+                    expected_output_len=int(output_lens[i]),
+                    multi_modal_data=mm_content,
+                )
+            )
+        return mm_requests
+
 
 
 # -----------------------------------------------------------------------------
