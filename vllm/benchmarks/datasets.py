@@ -621,8 +621,8 @@ class RandomMultiModalDataset(RandomDataset):
         )
         for _ in range(request_num_images):
             yield (
-                int(self._np_rng.integers(min_width, max_width) + 1),
-                int(self._np_rng.integers(min_height, max_height) + 1),
+                int(self._np_rng.integers(min_width, max_width + 1)),
+                int(self._np_rng.integers(min_height, max_height + 1)),
             )
 
     def sample(
