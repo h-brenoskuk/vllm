@@ -819,7 +819,15 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         "--dataset-name",
         type=str,
         default="random",
-        choices=["sharegpt", "burstgpt", "sonnet", "random", "hf", "custom"],
+        choices=[
+            "sharegpt",
+            "burstgpt",
+            "sonnet",
+            "random",
+            "random-mm",
+            "hf",
+            "custom",
+        ],
         help="Name of the dataset to benchmark on.",
     )
     parser.add_argument(
@@ -918,6 +926,85 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
               "context length sampled from [input_len * (1 - range_ratio), "
               "input_len * (1 + range_ratio)]."),
     )
+
+    # random multimodal dataset options
+    random_mm_group = parser.add_argument_group(
+        "random multimodal dataset options")
+    random_mm_group.add_argument(
+        "--random-mm-input-len",
+        type=int,
+        default=RandomDataset.DEFAULT_INPUT_LEN,
+        help=(
+            "Number of input tokens per request, used only for random-mm "
+            "sampling."
+        ),
+    )
+    random_mm_group.add_argument(
+        "--random-mm-output-len",
+        type=int,
+        default=RandomDataset.DEFAULT_OUTPUT_LEN,
+        help=(
+            "Number of output tokens per request, used only for random-mm "
+            "sampling."
+        ),
+    )
+    random_mm_group.add_argument(
+        "--random-mm-range-ratio",
+        type=float,
+        default=RandomDataset.DEFAULT_RANGE_RATIO,
+        help=(
+            "Range ratio for sampling input/output length, used only for "
+            "random-mm sampling. Must be in the range [0, 1) to define a "
+            "symmetric sampling range [length * (1 - range_ratio), length * "
+            "(1 + range_ratio)]."
+        ),
+    )
+    random_mm_group.add_argument(
+        "--random-mm-prefix-len",
+        type=int,
+        default=RandomDataset.DEFAULT_PREFIX_LEN,
+        help=(
+            "Number of fixed prefix tokens before the random context in a "
+            "request for random-mm."
+        ),
+    )
+    random_mm_group.add_argument(
+        "--random-mm-width",
+        type=int,
+        default=RandomMultiModalDataset.DEFAULT_WIDTH,
+        help="Image width in pixels per image for random-mm dataset.",
+    )
+    random_mm_group.add_argument(
+        "--random-mm-height",
+        type=int,
+        default=RandomMultiModalDataset.DEFAULT_HEIGHT,
+        help="Image height in pixels per image for random-mm dataset.",
+    )
+    random_mm_group.add_argument(
+        "--random-mm-num-images",
+        type=int,
+        default=RandomMultiModalDataset.DEFAULT_NUM_IMAGES,
+        help="Number of images per request for random-mm dataset.",
+    )
+    random_mm_group.add_argument(
+        "--random-mm-num-images-range-ratio",
+        type=float,
+        default=RandomMultiModalDataset.DEFAULT_NUM_IMAGES_RANGE_RATIO,
+        help=(
+            "Relative half-width of the sampling interval for number of "
+            "images in random-mm dataset. Must be in [0, 1)."
+        ),
+    )
+    random_mm_group.add_argument(
+        "--random-mm-dimension-range-ratio",
+        type=float,
+        default=RandomMultiModalDataset.DEFAULT_DIMENSION_RANGE_RATIO,
+        help=(
+            "Relative half-width of the sampling interval for image "
+            "dimensions in random-mm dataset. Must be in [0, 1)."
+        ),
+    )
+
 
     hf_group = parser.add_argument_group("hf dataset options")
     hf_group.add_argument("--hf-subset",
@@ -1054,9 +1141,32 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                 output_len=args.random_output_len,
                 range_ratio=args.random_range_ratio,
             ),
+            "random-mm":
+            lambda: RandomMultiModalDataset(
+                random_seed=args.seed, dataset_path=args.dataset_path
+            ).sample(
+                tokenizer=tokenizer,
+                num_requests=args.num_prompts,
+                prefix_len=args.random_mm_prefix_len,
+                range_ratio=args.random_mm_range_ratio,
+                input_len=args.random_mm_input_len,
+                output_len=args.random_mm_output_len,
+                width=args.random_mm_width,
+                height=args.random_mm_height,
+                num_images=args.random_mm_num_images,
+                num_images_range_ratio=args.random_mm_num_images_range_ratio,
+                dimension_range_ratio=args.random_mm_dimension_range_ratio,
+            ),
         }
 
         try:
+            # Enforce endpoint compatibility for multimodal datasets.
+            if args.dataset_name == "random-mm" and args.endpoint_type not in [
+                    "openai-chat"]:
+                raise ValueError(
+                    "Multi-modal content (images) is only supported on "
+                    "'openai-chat' backend."
+                )
             input_requests = dataset_mapping[args.dataset_name]()
         except KeyError as err:
             raise ValueError(f"Unknown dataset: {args.dataset_name}") from err
