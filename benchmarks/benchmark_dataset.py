@@ -289,11 +289,11 @@ class RandomDataset(BenchmarkDataset):
     DEFAULT_INPUT_LEN = 1024
     DEFAULT_OUTPUT_LEN = 128
 
-    def __init__(
-        self,
-        **kwargs,
-    ) -> None:
+    def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
+        random.seed(self.random_seed)
+        # Use numpy's default_rng for deterministic sampling
+        self._np_rng = np.random.default_rng(self.random_seed)
 
     def sample(
         self,
@@ -305,21 +305,63 @@ class RandomDataset(BenchmarkDataset):
         output_len: int = DEFAULT_OUTPUT_LEN,
         **kwargs,
     ) -> list[SampleRequest]:
-        # Enforce range_ratio < 1
-        assert range_ratio < 1.0, (
-            "random_range_ratio must be < 1.0 to ensure a valid sampling range"
+        input_lens, output_lens, offsets = self.get_sampling_params(
+            num_requests, range_ratio, input_len, output_len, tokenizer
         )
 
+        # Generate prefix once
+        prefix_token_ids = self.get_prefix(tokenizer, prefix_len)
         vocab_size = tokenizer.vocab_size
-        num_special_tokens = tokenizer.num_special_tokens_to_add()
-        real_input_len = input_len - num_special_tokens
 
-        prefix_token_ids = (
-            np.random.randint(0, vocab_size, size=prefix_len).tolist()
+        requests = []
+        for i in range(num_requests):
+            prompt, total_input_len = self.generate_token_sequence(
+                tokenizer=tokenizer,
+                prefix_token_ids=prefix_token_ids,
+                prefix_len=prefix_len,
+                vocab_size=vocab_size,
+                input_len=int(input_lens[i]),
+                offset=int(offsets[i]),
+                index=i,
+            )
+            requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=total_input_len,
+                    expected_output_len=int(output_lens[i]),
+                )
+            )
+        return requests
+
+    def get_prefix(
+        self, tokenizer: PreTrainedTokenizerBase, prefix_len: int
+    ) -> list[int]:
+        """
+        Get the prefix for the dataset.
+        """
+        return (
+            self._np_rng.integers(0, tokenizer.vocab_size, size=prefix_len).tolist()
             if prefix_len > 0
             else []
         )
 
+    def get_sampling_params(
+        self,
+        num_requests: int,
+        range_ratio: float,
+        input_len: int,
+        output_len: int,
+        tokenizer: PreTrainedTokenizerBase,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Get the sampling parameters for the dataset.
+        """
+        # Enforce range_ratio < 1
+        assert range_ratio < 1.0, (
+            "random_range_ratio must be < 1.0 to ensure a valid sampling range"
+        )
+        num_special_tokens = tokenizer.num_special_tokens_to_add()
+        real_input_len = input_len - num_special_tokens
         # New sampling logic: [X * (1 - b), X * (1 + b)]
         input_low = int(real_input_len * (1 - range_ratio))
         input_high = int(real_input_len * (1 + range_ratio))
@@ -330,42 +372,51 @@ class RandomDataset(BenchmarkDataset):
         output_high = int(output_len * (1 + range_ratio))
 
         # Add logging for debugging
-        logger.info("Sampling input_len from [%s, %s]", input_low, input_high)
-        logger.info("Sampling output_len from [%s, %s]", output_low, output_high)
+        logger.info(
+            "Sampling input_len from [%s, %s] and output_len from [%s, %s]",
+            input_low,
+            input_high,
+            output_low,
+            output_high,
+        )
 
-        input_lens = np.random.randint(input_low, input_high + 1, size=num_requests)
-        output_lens = np.random.randint(output_low, output_high + 1, size=num_requests)
-        offsets = np.random.randint(0, vocab_size, size=num_requests)
+        input_lens = self._np_rng.integers(input_low, input_high + 1, size=num_requests)
+        output_lens = self._np_rng.integers(
+            output_low, output_high + 1, size=num_requests
+        )
+        offsets = self._np_rng.integers(0, tokenizer.vocab_size, size=num_requests)
+        return input_lens, output_lens, offsets
 
-        requests = []
-        for i in range(num_requests):
-            inner_seq = (
-                (offsets[i] + i + np.arange(input_lens[i])) % vocab_size
-            ).tolist()
-            token_sequence = prefix_token_ids + inner_seq
-            prompt = tokenizer.decode(token_sequence)
-            # After decoding the prompt we have to encode and decode it again.
-            # This is done because in some cases N consecutive tokens
-            # give a string tokenized into != N number of tokens.
-            # For example for GPT2Tokenizer:
-            # [6880, 6881] -> ['Ġcalls', 'here'] ->
-            # [1650, 939, 486] -> ['Ġcall', 'sh', 'ere']
-            # To avoid uncontrolled change of the prompt length,
-            # the encoded sequence is truncated before being decode again.
-            total_input_len = prefix_len + int(input_lens[i])
-            re_encoded_sequence = tokenizer.encode(prompt, add_special_tokens=False)[
-                :total_input_len
-            ]
-            prompt = tokenizer.decode(re_encoded_sequence)
-            total_input_len = len(re_encoded_sequence)
-            requests.append(
-                SampleRequest(
-                    prompt=prompt,
-                    prompt_len=total_input_len,
-                    expected_output_len=int(output_lens[i]),
-                )
-            )
-        return requests
+    def generate_token_sequence(
+        self,
+        *,
+        tokenizer: PreTrainedTokenizerBase,
+        prefix_token_ids: list[int],
+        prefix_len: int,
+        vocab_size: int,
+        input_len: int,
+        offset: int,
+        index: int,
+    ) -> tuple[str, int]:
+        """
+        Replicates the per-request logic from `sample` without changing behavior.
+        Returns (prompt, total_input_len, expected_output_len).
+        """
+        # Build the deterministic inner sequence by sampling sequentially from the vocab
+        inner_seq = ((offset + index + np.arange(input_len)) % vocab_size).tolist()
+        token_sequence = prefix_token_ids + inner_seq
+
+        # Decode, then re-encode and truncate to preserve token count invariants
+        prompt = tokenizer.decode(token_sequence)
+        total_input_len = prefix_len + int(input_len)
+
+        re_encoded_sequence = tokenizer.encode(prompt, add_special_tokens=False)[
+            :total_input_len
+        ]
+        prompt = tokenizer.decode(re_encoded_sequence)
+        total_input_len = len(re_encoded_sequence)
+
+        return prompt, total_input_len
 
 
 # -----------------------------------------------------------------------------
