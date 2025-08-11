@@ -61,6 +61,10 @@ logger = logging.getLogger(__name__)
 # Data Classes
 # -----------------------------------------------------------------------------
 
+MultiModalData = Union[
+    MultiModalDataDict, 
+    dict, list[dict], 
+    list[Mapping[str, Any]]]
 
 @dataclass
 class SampleRequest:
@@ -71,9 +75,7 @@ class SampleRequest:
     prompt: Union[str, Any]
     prompt_len: int
     expected_output_len: int
-    multi_modal_data: Optional[
-        Union[MultiModalDataDict, dict, list[dict], list[Mapping[str, Any]]]
-    ] = None
+    multi_modal_data: Optional[MultiModalData] = None
     lora_request: Optional[LoRARequest] = None
 
 
@@ -111,7 +113,7 @@ class BenchmarkDataset(ABC):
     def apply_multimodal_chat_transformation(
             self,
             prompt: str,
-            mm_content: Optional[MultiModalDataDict] = None) -> list[dict]:
+            mm_content: Optional[MultiModalData] = None) -> list[dict]:
         """
         Transform a prompt and optional multimodal content into a chat format.
         This method is used for chat models that expect a specific conversation
@@ -119,7 +121,15 @@ class BenchmarkDataset(ABC):
         """
         content = [{"text": prompt, "type": "text"}]
         if mm_content is not None:
-            content.append(mm_content)
+            if isinstance(mm_content, list):
+                content.extend(mm_content)
+            elif isinstance(mm_content, dict):
+                content.append(mm_content)
+            else:
+                raise TypeError(
+                    "multi_modal_content must be a dict or list[dict] "
+                    "for openai-chat"
+                )
         return [{"role": "user", "content": content}]
 
     def load_data(self) -> None:
