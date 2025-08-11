@@ -283,7 +283,26 @@ def process_image(image: Any) -> Mapping[str, Any]:
 
 
 class RandomDataset(BenchmarkDataset):
-    # Default values copied from benchmark_serving.py for the random dataset.
+    """
+    RandomDataset is used to produce SampleRequests whose text tokenized lengths vary
+    around user-specified targets. For each request, it draws an input length and an
+    expected output length independently from a closed interval
+    [X * (1 - range_ratio), X * (1 + range_ratio)], where X is the configured
+    mean length (input_len or output_len).
+    The “ramp” pattern (offset + i) % vocab_size is structured and not i.i.d. uniform.
+    TODO: more sampling strategies.
+
+    Prompts are constructed by:
+    - creating an optional random prefix of length `prefix_len`, and
+    - appending a pseudo-random token ramp (offset + i) % vocab_size
+      to reach the sampled input length.
+    The text is then re-tokenized and truncated to ensure the final
+    prompt contains *at most* the intended number of tokens. No special tokens
+    are added to the prompt.
+
+    Reproducibility: uses the dataset's `random_seed` to seed NumPy's RNG.
+    """
+
     DEFAULT_PREFIX_LEN = 0
     DEFAULT_RANGE_RATIO = 0.0
     DEFAULT_INPUT_LEN = 1024
@@ -291,7 +310,6 @@ class RandomDataset(BenchmarkDataset):
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
-        random.seed(self.random_seed)
         # Use numpy's default_rng for deterministic sampling
         self._np_rng = np.random.default_rng(self.random_seed)
 
@@ -305,6 +323,41 @@ class RandomDataset(BenchmarkDataset):
         output_len: int = DEFAULT_OUTPUT_LEN,
         **kwargs,
     ) -> list[SampleRequest]:
+        """
+        Generate `num_requests` synthetic prompts and expected output lengths.
+
+        Parameters
+        - tokenizer: Hugging Face tokenizer used to convert token IDs to text.
+          Special tokens are not added when re-encoding (add_special_tokens=False).
+        - num_requests: Number of requests to generate.
+        - prefix_len: Fixed number of random prefix tokens prepended to every prompt.
+        - range_ratio: Relative half-width of the sampling interval for lengths.
+          For a target X, actual lengths are sampled uniformly from the integer
+          interval [floor(X*(1 - range_ratio)), ceil(X*(1 + range_ratio))].
+          Must be < 1.0.
+        - input_len: Target input token length (including `prefix_len`), before
+          any special tokens. The final prompt is truncated after re-tokenizing
+          to exactly the sampled input length.
+        - output_len: Target output token length used to set
+          `expected_output_len` per request; not used to generate text.
+
+        Returns
+        - List of `SampleRequest` with:
+          - prompt: Decoded prompt text
+          - prompt_len: Final tokenized length of `prompt`
+          - expected_output_len: Sampled output length
+
+        Raises
+        - AssertionError: if `range_ratio >= 1.0`.
+        - ValueError: if computed sampling intervals are invalid (e.g., empty).
+
+        Implementation details
+        - To avoid drift caused by tokenizer merges, the method decodes a
+          candidate prompt, re-encodes without special tokens, truncates to the
+          sampled length, and decodes again to produce the final text. This
+          ensures `prompt_len` matches the sampled token count.
+        - Logs the input and output sampling intervals at INFO level.
+        """
         input_lens, output_lens, offsets = self.get_sampling_params(
             num_requests, range_ratio, input_len, output_len, tokenizer
         )
@@ -399,8 +452,7 @@ class RandomDataset(BenchmarkDataset):
         index: int,
     ) -> tuple[str, int]:
         """
-        Replicates the per-request logic from `sample` without changing behavior.
-        Returns (prompt, total_input_len, expected_output_len).
+        Returns (prompt, total_input_len).
         """
         # Build the deterministic inner sequence by sampling sequentially from the vocab
         inner_seq = ((offset + index + np.arange(input_len)) % vocab_size).tolist()
