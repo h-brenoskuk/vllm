@@ -21,7 +21,7 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from functools import cache
 from io import BytesIO
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Optional, Union, cast
 
 import numpy as np
 from PIL import Image
@@ -61,11 +61,6 @@ logger = logging.getLogger(__name__)
 # Data Classes
 # -----------------------------------------------------------------------------
 
-MultiModalData = Union[
-    MultiModalDataDict, 
-    dict, list[dict], 
-    list[Mapping[str, Any]]]
-
 @dataclass
 class SampleRequest:
     """
@@ -75,7 +70,9 @@ class SampleRequest:
     prompt: Union[str, Any]
     prompt_len: int
     expected_output_len: int
-    multi_modal_data: Optional[MultiModalData] = None
+    multi_modal_data: Optional[
+        Union[MultiModalDataDict, dict, list[dict]]
+    ] = None
     lora_request: Optional[LoRARequest] = None
 
 
@@ -113,22 +110,23 @@ class BenchmarkDataset(ABC):
     def apply_multimodal_chat_transformation(
             self,
             prompt: str,
-            mm_content: Optional[MultiModalData] = None) -> list[dict]:
+            mm_content: Optional[
+                Union[MultiModalDataDict, dict, list[dict]]
+            ] = None) -> list[dict]:
         """
         Transform a prompt and optional multimodal content into a chat format.
         This method is used for chat models that expect a specific conversation
         format.
         """
-        content = [{"text": prompt, "type": "text"}]
+        content: list[dict[str, Any]] = [{"text": prompt, "type": "text"}]
         if mm_content is not None:
             if isinstance(mm_content, list):
-                content.extend(mm_content)
+                content.extend(cast(list[dict[str, Any]], mm_content))
             elif isinstance(mm_content, dict):
                 content.append(mm_content)
             else:
                 raise TypeError(
-                    "multi_modal_content must be a dict or list[dict] "
-                    "for openai-chat"
+                    "Could not process multimodal content"
                 )
         return [{"role": "user", "content": content}]
 
@@ -690,6 +688,7 @@ class RandomMultiModalDataset(RandomDataset):
         # Add synthetic images to each request
         mm_requests = []
         for i in range(num_requests):
+            prompt: str | list[dict[str, Any]] = ""
             prompt, total_input_len = self.generate_token_sequence(
                 tokenizer=tokenizer,
                 prefix_token_ids=prefix_token_ids,
@@ -713,15 +712,15 @@ class RandomMultiModalDataset(RandomDataset):
             # {"type": "image_input", "image_url": f"{base64_image}"}
             # This follows the OpenAI API chat completions
             # https://github.com/openai/openai-python
-            mm_content = [
+            mm_content = cast(list[dict[str, Any]], [
                 process_image(
                     self.generate_synthetic_image(width, height)
                 )
                 for width, height in image_dimensions_iterator
-            ]
-            # TODO: Handle multimodal chat transformation
+            ])
             if enable_multimodal_chat:
-                pass
+                prompt = self.apply_multimodal_chat_transformation(
+                    prompt, mm_content)
             mm_requests.append(
                 SampleRequest(
                     prompt=prompt,
