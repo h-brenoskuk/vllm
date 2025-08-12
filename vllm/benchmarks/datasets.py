@@ -321,24 +321,62 @@ def process_image(image: Any) -> Mapping[str, Any]:
 
 class RandomDataset(BenchmarkDataset):
     """
-    RandomDataset is used to produce SampleRequests whose text tokenized 
-    lengths vary around user-specified targets. For each request, 
-    it draws an input length and an expected output length independently from 
-    a closed interval     [X * (1 - range_ratio), X * (1 + range_ratio)], 
-    where X is the configured mean length (input_len or output_len).
-    The “ramp” pattern (offset + i) % vocab_size is structured and not i.i.d. 
-    uniform.
-    TODO: more sampling strategies.
+    Generate synthetic prompts whose tokenized lengths vary around targets.
 
-    Prompts are constructed by:
-    - creating an optional random prefix of length `prefix_len`, and
-    - appending a pseudo-random token ramp (offset + i) % vocab_size
-      to reach the sampled input length.
-    The text is then re-tokenized and truncated to ensure the final
-    prompt contains *at most* the intended number of tokens. No special tokens
-    are added to the prompt.
+    Behavior
+    --------
+    For each request, this dataset:
+      1) Samples an **inner** input length `L_in` and an output length `L_out`
+         independently from the closed integer intervals
+         `[floor(X*(1 - range_ratio)), ceil(X*(1 + range_ratio))]`,
+         where `X` is `input_len - tokenizer.num_special_tokens_to_add()` for
+         inputs, and `X` is `output_len` for outputs. 
+         `L_out` is clamped to >= 1.
+      2) Builds a single random prefix of length `prefix_len` **once per call**
+         to `sample(...)` and prepends it to every request.
+      3) Appends a structured “ramp” sequence of token ids:
+         `((offset + index) + arange(L_in)) % vocab_size`,
+         where `offset` is drawn uniformly for each request.
+      4) Decodes the candidate token sequence to text, re-encodes it with
+         `add_special_tokens=False`, truncates to at most
+         `prefix_len + L_in` tokens, and decodes again. The returned
+         `prompt_len` equals the length of this truncated re-encoding.
 
-    Reproducibility: uses the dataset's `random_seed` to seed NumPy's RNG.
+    Notes
+    -----
+    - No special tokens are added to the prompt by this dataset. The subtraction
+      of `tokenizer.num_special_tokens_to_add()` from `input_len` is a budgeting
+      choice so downstream code can add specials without exceeding the intended
+      total length. If you will not add specials later, set `input_len`
+      accordingly.
+    - The ramp pattern is structured (not i.i.d. uniform) but varies per
+      request via its random `offset`.
+
+    Reproducibility
+    ---------------
+    Uses a per-instance NumPy Generator
+    (`np.random.default_rng(self.random_seed)`)
+    for all sampling, providing deterministic results without mutating global 
+    RNG state.
+
+    Args:
+        tokenizer: Hugging Face tokenizer used for encode/decode. Re-encoding
+            uses `add_special_tokens=False`.
+        num_requests: Number of requests to generate.
+        prefix_len: Number of random prefix tokens (shared by all requests in
+            this batch).
+        range_ratio: Relative half-width (b in [0,1)) of the sampling interval.
+            Must be < 1.0.
+        input_len: Target **inner** token length (mean of `L_in`), i.e., the
+            length of the ramp before adding the prefix. The final prompt is
+            truncated after re-tokenization to at most `prefix_len + L_in`.
+        output_len: Target mean output token length used to sample `L_out`.
+
+    Returns:
+        List[SampleRequest]: each with
+            - prompt: Decoded prompt text
+            - prompt_len: Actual tokenized length after truncation
+            - expected_output_len: Sampled `L_out`
     """
 
     DEFAULT_PREFIX_LEN = 0
@@ -516,14 +554,12 @@ class RandomDataset(BenchmarkDataset):
         # Decode, then re-encode and truncate to preserve token count invariants
         prompt = tokenizer.decode(token_sequence)
         total_input_len = prefix_len + int(input_len)
-
         re_encoded_sequence = tokenizer.encode(
             prompt,
             add_special_tokens=False,
         )[:total_input_len]
         prompt = tokenizer.decode(re_encoded_sequence)
         total_input_len = len(re_encoded_sequence)
-
         return prompt, total_input_len
 
 
@@ -633,10 +669,10 @@ class RandomMultiModalDataset(RandomDataset):
         range_ratio: float = RandomDataset.DEFAULT_RANGE_RATIO,
         input_len: int = RandomDataset.DEFAULT_INPUT_LEN,
         output_len: int = RandomDataset.DEFAULT_OUTPUT_LEN,
-        width: int = DEFAULT_WIDTH,
-        height: int = DEFAULT_HEIGHT,
         num_images: int = DEFAULT_NUM_IMAGES,
         num_images_range_ratio: float = DEFAULT_NUM_IMAGES_RANGE_RATIO,
+        width: int = DEFAULT_WIDTH,
+        height: int = DEFAULT_HEIGHT,
         dimension_range_ratio: float = DEFAULT_DIMENSION_RANGE_RATIO,
         enable_multimodal_chat: bool = DEFAULT_ENABLE_MULTIMODAL_CHAT,
         **kwargs,
