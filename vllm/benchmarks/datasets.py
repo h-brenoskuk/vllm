@@ -387,15 +387,17 @@ class RandomDataset(BenchmarkDataset):
 
         Buffered canonicalization kwargs:
         - buffer_ratio (float): Proportion of the target total to over-generate.
-          Default 0.15. Set to 0 to disable buffering and revert to "at most K".
-        - min_buffer (int): Minimum over-generation tokens. Default 8.
-        - max_iters (int): Max extension attempts when still short. Default 2.
-        - extra_margin_floor (int): Extra tokens to add per retry. Default 4.
+          Set to 0 to disable buffering and revert to "at most K".
+        - min_buffer (int): Minimum over-generation tokens.
+        - max_iters (int): Max extension attempts when still short.
+        - extra_margin_floor (int): Extra tokens to add per retry.
 
     Returns:
         List[SampleRequest]: each with
             - prompt: Decoded prompt text
-            - prompt_len: Actual tokenized length after canonicalization
+            - prompt_len: Actual tokenized length when re-encoding the
+              returned text (may differ from the target due to prefix
+              non-canonicality)
             - expected_output_len: Sampled `L_out`
     """
 
@@ -463,15 +465,23 @@ class RandomDataset(BenchmarkDataset):
           if under length, over-generates by a small buffer and retries up to a
           bounded number of times. On success, the canonical re-encoding is
           sliced to the exact target token count.
-        - Logs the input and output sampling intervals at INFO level.
+        - Logs the input and output sampling intervals at DEBUG level.
         """
-        input_lens, output_lens, offsets = self.get_text_sampling_params(
-            num_requests, range_ratio, input_len, output_len, tokenizer
+        # Precompute allowed (non-special) token ids once per call.
+        allowed_ids = self._allowed_ids(tokenizer)
+        input_lens, output_lens, phases = self.get_text_sampling_params(
+            num_requests=num_requests,
+            range_ratio=range_ratio,
+            input_len=input_len,
+            output_len=output_len,
+            tokenizer=tokenizer,
+            allowed_ids=allowed_ids,
         )
 
         # Generate prefix once
-        prefix_token_ids = self.get_prefix(tokenizer, prefix_len)
-        vocab_size = tokenizer.vocab_size
+        prefix_token_ids = self.get_prefix(
+            tokenizer, prefix_len, allowed_ids=allowed_ids
+        )
 
         # Buffered canonicalization config
         buffer_ratio: float = kwargs.get("buffer_ratio",
@@ -490,10 +500,9 @@ class RandomDataset(BenchmarkDataset):
                 self.generate_token_sequence(
                 tokenizer=tokenizer,
                 prefix_token_ids=prefix_token_ids,
-                prefix_len=prefix_len,
-                vocab_size=vocab_size,
                 input_len=int(input_lens[i]),
-                offset=int(offsets[i]),
+                phase=int(phases[i]),
+                allowed_ids=allowed_ids,
                 index=i,
                 buffer_ratio=buffer_ratio,
                 min_buffer=min_buffer,
@@ -526,25 +535,39 @@ class RandomDataset(BenchmarkDataset):
             )
         return requests
 
+    def _allowed_ids(self, tokenizer: PreTrainedTokenizerBase) -> np.ndarray:
+        """Return array of non-special token IDs.
+
+        Raises ValueError if no non-special IDs exist.
+        """
+        special_ids: set[int] = set(
+            getattr(tokenizer, "all_special_ids", []) or []
+        )
+        allowed = np.array(
+            [i for i in range(tokenizer.vocab_size) if i not in special_ids],
+            dtype=np.int32,
+        )
+        if allowed.size == 0:
+            raise ValueError("No non-special token IDs available.")
+        return allowed
+
     def get_prefix(
-        self, tokenizer: PreTrainedTokenizerBase, prefix_len: int
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        prefix_len: int,
+        *,
+        allowed_ids: Optional[np.ndarray] = None,
     ) -> list[int]:
         """
         Get the prefix for the dataset.
         """
         if prefix_len <= 0:
             return []
-        vocab_size = tokenizer.vocab_size
-        # Exclude special token IDs from random draws
-        special_ids: set[int] = set(getattr(tokenizer, "all_special_ids", [])
-                                    or [])
-        allowed_ids = [i for i in range(vocab_size) if i not in special_ids]
-        if not allowed_ids:
-            raise ValueError(
-                "No non-special token IDs available for prefix generation.")
-        return self._np_rng.choice(allowed_ids,
-                                   size=prefix_len,
-                                   replace=True).tolist()
+        if allowed_ids is None:
+            allowed_ids = self._allowed_ids(tokenizer)
+        return self._np_rng.choice(
+            allowed_ids, size=prefix_len, replace=True
+        ).tolist()
 
     def get_text_sampling_params(
         self,
@@ -553,6 +576,8 @@ class RandomDataset(BenchmarkDataset):
         input_len: int,
         output_len: int,
         tokenizer: PreTrainedTokenizerBase,
+        *,
+        allowed_ids: Optional[np.ndarray] = None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Get the sampling parameters for the dataset.
@@ -581,8 +606,8 @@ class RandomDataset(BenchmarkDataset):
                 f"low={output_low} > high={output_high}"
             )
 
-        # Add logging for debugging
-        logger.info(
+        # Add logging for debugging (use DEBUG to avoid noise)
+        logger.debug(
             "Sampling input_len from [%s, %s] and output_len from [%s, %s]",
             input_low,
             input_high,
@@ -594,27 +619,21 @@ class RandomDataset(BenchmarkDataset):
                                            size=num_requests)
         output_lens = self._np_rng.integers(output_low, output_high + 1,
                                             size=num_requests)
-        # Sample offsets excluding special token IDs
-        special_ids: set[int] = set(getattr(tokenizer, "all_special_ids", [])
-                                    or [])
-        allowed_ids = [i for i in range(tokenizer.vocab_size)
-                       if i not in special_ids]
-        if not allowed_ids:
-            raise ValueError(
-                "No non-special token IDs available for offset generation.")
-        offsets = self._np_rng.choice(allowed_ids, size=num_requests,
-                                      replace=True)
-        return input_lens, output_lens, offsets
+        # Sample phases directly in [0, n_allowed).
+        if allowed_ids is None:
+            allowed_ids = self._allowed_ids(tokenizer)
+        n_allowed = int(allowed_ids.size)
+        phases = self._np_rng.integers(0, n_allowed, size=num_requests)
+        return input_lens, output_lens, phases
 
     def generate_token_sequence(
         self,
         *,
         tokenizer: PreTrainedTokenizerBase,
         prefix_token_ids: list[int],
-        prefix_len: int,
-        vocab_size: int,
+        allowed_ids: np.ndarray,
         input_len: int,
-        offset: int,
+        phase: int,
         index: int,
         buffer_ratio: float,
         min_buffer: int,
@@ -626,48 +645,54 @@ class RandomDataset(BenchmarkDataset):
 
         Returns (prompt, total_input_len, retries_taken).
         """
-        # Build the deterministic inner sequence by sampling sequentially
-        # from the vocabulary. We will extend this sequence in-place if needed.
+        # Build the deterministic inner sequence using only non-special IDs.
         base_inner_len = int(input_len)
-        inner_seq = (
-            (offset + index + np.arange(base_inner_len)) % vocab_size
-        ).tolist()
+        n_allowed = int(allowed_ids.size)
+        phase = int(phase) % n_allowed
+        base_idx = (
+            phase + int(index) + np.arange(base_inner_len)
+        ) % n_allowed
+        inner_seq = allowed_ids[base_idx]
 
-        target_total = prefix_len + base_inner_len
+        target_total = len(prefix_token_ids) + base_inner_len
 
         # Fast path: buffering disabled → current "at most K" behavior.
         if buffer_ratio <= 0.0:
-            token_sequence = prefix_token_ids + inner_seq
+            token_sequence = (
+                np.concatenate(
+                    [np.array(prefix_token_ids, dtype=np.int32), inner_seq]
+                ).tolist()
+            )
             prompt = tokenizer.decode(
-                token_sequence, clean_up_tokenization_spaces=False)
-            re_encoded_sequence = tokenizer.encode(
-                prompt,
-                add_special_tokens=False,
+                token_sequence, clean_up_tokenization_spaces=False
+            )
+            # Slice, then re-decode and re-encode to report actual length.
+            sliced_ids = tokenizer.encode(
+                prompt, add_special_tokens=False
             )[:target_total]
             prompt = tokenizer.decode(
-                re_encoded_sequence, clean_up_tokenization_spaces=False)
-            return prompt, len(re_encoded_sequence), 0
+                sliced_ids, clean_up_tokenization_spaces=False
+            )
+            return prompt, len(sliced_ids), 0
 
         # Initial over-generation buffer
         initial_buffer = max(
             min_buffer, int(round(buffer_ratio * target_total))
         )
         if initial_buffer > 0:
-            extension = (
-                (
-                    offset
-                    + index
-                    + np.arange(
-                        base_inner_len,
-                        base_inner_len + initial_buffer,
-                    )
-                )
-                % vocab_size
-            ).tolist()
-            inner_seq.extend(extension)
+            ext_idx = (
+                phase
+                + int(index)
+                + np.arange(base_inner_len, base_inner_len + initial_buffer)
+            ) % n_allowed
+            inner_seq = np.concatenate([inner_seq, allowed_ids[ext_idx]])
 
         retries_taken = 0
-        token_sequence = prefix_token_ids + inner_seq
+        token_sequence = (
+            np.concatenate(
+                [np.array(prefix_token_ids, dtype=np.int32), inner_seq]
+            ).tolist()
+        )
         prompt = tokenizer.decode(
             token_sequence, clean_up_tokenization_spaces=False
         )
@@ -683,11 +708,14 @@ class RandomDataset(BenchmarkDataset):
             start = (
                 base_inner_len + initial_buffer + (retries_taken - 1) * extra
             )
-            extension = (
-                (offset + index + np.arange(start, start + extra)) % vocab_size
-            ).tolist()
-            inner_seq.extend(extension)
-            token_sequence = prefix_token_ids + inner_seq
+            ext_idx = (phase + int(index) + np.arange(start, start + extra)) \
+                % n_allowed
+            inner_seq = np.concatenate([inner_seq, allowed_ids[ext_idx]])
+            token_sequence = (
+                np.concatenate(
+                    [np.array(prefix_token_ids, dtype=np.int32), inner_seq]
+                ).tolist()
+            )
             prompt = tokenizer.decode(
                 token_sequence, clean_up_tokenization_spaces=False)
             canonical_ids = tokenizer.encode(prompt, add_special_tokens=False)
@@ -695,18 +723,29 @@ class RandomDataset(BenchmarkDataset):
         # At this point, either canonical_ids is long enough,
         # or we give the best-effort slice. Log warning if we undershoot.
         if len(canonical_ids) < target_total:
-            logger.warning(
-                "Buffered canonicalization undershoot: "
-                "got=%d target=%d retries=%d",
+            logger.debug(
+                "Buffered canonicalization undershoot: got=%d target=%d "
+                "retries=%d",
                 len(canonical_ids),
                 target_total,
                 retries_taken,
             )
         canonical_ids = canonical_ids[:target_total]
 
-        prompt = tokenizer.decode(canonical_ids,
-                                  clean_up_tokenization_spaces=False)
-        return prompt, len(canonical_ids), retries_taken
+        # Decode the slice, then re-encode to get the true prompt length.
+        prompt = tokenizer.decode(
+            canonical_ids, clean_up_tokenization_spaces=False
+        )
+        final_ids = tokenizer.encode(prompt, add_special_tokens=False)
+        if len(final_ids) != len(canonical_ids):
+            logger.debug(
+                "Prefix non-canonical: final_len=%d sliced_len=%d "
+                "target=%d",
+                len(final_ids),
+                len(canonical_ids),
+                target_total,
+            )
+        return prompt, len(final_ids), retries_taken
 
 
 # -----------------------------------------------------------------------------
@@ -845,8 +884,14 @@ class RandomMultiModalDataset(RandomDataset):
             List of SampleRequest objects with properly formatted OpenAI
             multimodal data.
         """
-        input_lens, output_lens, offsets = self.get_text_sampling_params(
-            num_requests, range_ratio, input_len, output_len, tokenizer
+        allowed_ids = self._allowed_ids(tokenizer)
+        input_lens, output_lens, phases = self.get_text_sampling_params(
+            num_requests=num_requests,
+            range_ratio=range_ratio,
+            input_len=input_len,
+            output_len=output_len,
+            tokenizer=tokenizer,
+            allowed_ids=allowed_ids,
         )
 
         (
@@ -865,8 +910,9 @@ class RandomMultiModalDataset(RandomDataset):
         )
 
         # Generate prefix once
-        prefix_token_ids = self.get_prefix(tokenizer, prefix_len)
-        vocab_size = tokenizer.vocab_size
+        prefix_token_ids = self.get_prefix(
+            tokenizer, prefix_len, allowed_ids=allowed_ids
+        )
         # Add synthetic images to each request
         mm_requests = []
         for i in range(num_requests):
@@ -884,10 +930,9 @@ class RandomMultiModalDataset(RandomDataset):
             prompt, total_input_len, _retries = self.generate_token_sequence(
                 tokenizer=tokenizer,
                 prefix_token_ids=prefix_token_ids,
-                prefix_len=prefix_len,
-                vocab_size=vocab_size,
+                allowed_ids=allowed_ids,
                 input_len=int(input_lens[i]),
-                offset=int(offsets[i]),
+                phase=int(phases[i]),
                 index=i,
                 buffer_ratio=buffer_ratio,
                 min_buffer=min_buffer,
