@@ -16,6 +16,7 @@ import io
 import json
 import logging
 import random
+import math
 from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
@@ -354,6 +355,8 @@ class RandomDataset(BenchmarkDataset):
     - Re-encoding always uses `add_special_tokens=False` and decoding uses
       `clean_up_tokenization_spaces=False` to reduce non-determinism from
       whitespace cleanup.
+    - Canonicalization ensures the full sequence round-trips to the same IDs;
+      prefixes may not.
     - There is no general guarantee that buffered canonicalization will exactly
       hit the target across every tokenizer configuration or normalization
       setting. It works for typical configurations and falls back to "at most K"
@@ -529,15 +532,19 @@ class RandomDataset(BenchmarkDataset):
         """
         Get the prefix for the dataset.
         """
-        return (
-            self._np_rng.integers(
-                0,
-                tokenizer.vocab_size,
-                size=prefix_len,
-            ).tolist()
-            if prefix_len > 0
-            else []
-        )
+        if prefix_len <= 0:
+            return []
+        vocab_size = tokenizer.vocab_size
+        # Exclude special token IDs from random draws
+        special_ids: set[int] = set(getattr(tokenizer, "all_special_ids", [])
+                                    or [])
+        allowed_ids = [i for i in range(vocab_size) if i not in special_ids]
+        if not allowed_ids:
+            raise ValueError(
+                "No non-special token IDs available for prefix generation.")
+        return self._np_rng.choice(allowed_ids,
+                                   size=prefix_len,
+                                   replace=True).tolist()
 
     def get_text_sampling_params(
         self,
@@ -554,16 +561,23 @@ class RandomDataset(BenchmarkDataset):
         assert range_ratio < 1.0, (
             "random_range_ratio must be < 1.0 to ensure a valid sampling range"
         )
-        num_special_tokens = tokenizer.num_special_tokens_to_add()
-        real_input_len = input_len - num_special_tokens
-        # New sampling logic: [X * (1 - b), X * (1 + b)]
-        input_low = int(real_input_len * (1 - range_ratio))
-        input_high = int(real_input_len * (1 + range_ratio))
-        output_low = int(output_len * (1 - range_ratio))
-        # Ensure the lower bound for output length is at least 1 to prevent
-        # sampling 0 tokens, which can cause request failures.
+        num_special_tokens = int(tokenizer.num_special_tokens_to_add())
+        real_input_len = max(0, int(input_len) - num_special_tokens)
+        # Bounds use floor for low and ceil for high
+        input_low = math.floor(real_input_len * (1 - range_ratio))
+        input_high = math.ceil(real_input_len * (1 + range_ratio))
+        output_low = math.floor(output_len * (1 - range_ratio))
+        output_high = math.ceil(output_len * (1 + range_ratio))
         output_low = max(output_low, 1)
-        output_high = int(output_len * (1 + range_ratio))
+
+        if input_low > input_high:
+            raise ValueError(
+                f"Invalid input sampling interval: low={input_low} > high={input_high}"
+            )
+        if output_low > output_high:
+            raise ValueError(
+                f"Invalid output sampling interval: low={output_low} > high={output_high}"
+            )
 
         # Add logging for debugging
         logger.info(
@@ -574,19 +588,20 @@ class RandomDataset(BenchmarkDataset):
             output_high,
         )
 
-        input_lens = self._np_rng.integers(
-            input_low,
-            input_high + 1,
-            size=num_requests,
-        )
-        output_lens = self._np_rng.integers(
-            output_low, output_high + 1, size=num_requests
-        )
-        offsets = self._np_rng.integers(
-            0,
-            tokenizer.vocab_size,
-            size=num_requests,
-        )
+        input_lens = self._np_rng.integers(input_low, input_high + 1,
+                                           size=num_requests)
+        output_lens = self._np_rng.integers(output_low, output_high + 1,
+                                            size=num_requests)
+        # Sample offsets excluding special token IDs
+        special_ids: set[int] = set(getattr(tokenizer, "all_special_ids", [])
+                                    or [])
+        allowed_ids = [i for i in range(tokenizer.vocab_size)
+                       if i not in special_ids]
+        if not allowed_ids:
+            raise ValueError(
+                "No non-special token IDs available for offset generation.")
+        offsets = self._np_rng.choice(allowed_ids, size=num_requests,
+                                      replace=True)
         return input_lens, output_lens, offsets
 
     def generate_token_sequence(
@@ -676,12 +691,15 @@ class RandomDataset(BenchmarkDataset):
             canonical_ids = tokenizer.encode(prompt, add_special_tokens=False)
 
         # At this point, either canonical_ids is long enough,
-        # or we give the best-effort slice.
-        if len(canonical_ids) >= target_total:
-            canonical_ids = canonical_ids[:target_total]
-        else:
-            # Best-effort: still short; keep current at-most behavior
-            canonical_ids = canonical_ids[:target_total]
+        # or we give the best-effort slice. Log warning if we undershoot.
+        if len(canonical_ids) < target_total:
+            logger.warning(
+                "Buffered canonicalization undershoot: got=%d target=%d retries=%d",
+                len(canonical_ids),
+                target_total,
+                retries_taken,
+            )
+        canonical_ids = canonical_ids[:target_total]
 
         prompt = tokenizer.decode(canonical_ids,
                                   clean_up_tokenization_spaces=False)
