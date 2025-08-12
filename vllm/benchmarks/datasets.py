@@ -15,8 +15,8 @@ import base64
 import io
 import json
 import logging
-import random
 import math
+import random
 from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
@@ -572,11 +572,13 @@ class RandomDataset(BenchmarkDataset):
 
         if input_low > input_high:
             raise ValueError(
-                f"Invalid input sampling interval: low={input_low} > high={input_high}"
+                "Invalid input sampling interval: "
+                f"low={input_low} > high={input_high}"
             )
         if output_low > output_high:
             raise ValueError(
-                f"Invalid output sampling interval: low={output_low} > high={output_high}"
+                "Invalid output sampling interval: "
+                f"low={output_low} > high={output_high}"
             )
 
         # Add logging for debugging
@@ -694,7 +696,8 @@ class RandomDataset(BenchmarkDataset):
         # or we give the best-effort slice. Log warning if we undershoot.
         if len(canonical_ids) < target_total:
             logger.warning(
-                "Buffered canonicalization undershoot: got=%d target=%d retries=%d",
+                "Buffered canonicalization undershoot: "
+                "got=%d target=%d retries=%d",
                 len(canonical_ids),
                 target_total,
                 retries_taken,
