@@ -398,7 +398,7 @@ class RandomDataset(BenchmarkDataset):
           ensures `prompt_len` matches the sampled token count.
         - Logs the input and output sampling intervals at INFO level.
         """
-        input_lens, output_lens, offsets = self.get_sampling_params(
+        input_lens, output_lens, offsets = self.get_text_sampling_params(
             num_requests, range_ratio, input_len, output_len, tokenizer
         )
 
@@ -442,7 +442,7 @@ class RandomDataset(BenchmarkDataset):
             else []
         )
 
-    def get_sampling_params(
+    def get_text_sampling_params(
         self,
         num_requests: int,
         range_ratio: float,
@@ -663,7 +663,7 @@ class RandomMultiModalDataset(RandomDataset):
             List of SampleRequest objects with properly formatted OpenAI
             multimodal data.
         """
-        input_lens, output_lens, offsets = self.get_sampling_params(
+        input_lens, output_lens, offsets = self.get_text_sampling_params(
             num_requests, range_ratio, input_len, output_len, tokenizer
         )
 
