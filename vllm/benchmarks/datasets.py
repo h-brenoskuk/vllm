@@ -321,26 +321,28 @@ def process_image(image: Any) -> Mapping[str, Any]:
 
 class RandomDataset(BenchmarkDataset):
     """
-    Generate synthetic prompts whose tokenized lengths vary around targets.
+    Generate synthetic prompts with lengths sampled around targets.
 
     Behavior
     --------
     For each request, this dataset:
       1) Samples an **inner** input length `L_in` and an output length `L_out`
-         independently from the closed integer intervals
+         independently from
          `[floor(X*(1 - range_ratio)), ceil(X*(1 + range_ratio))]`,
          where `X` is `input_len - tokenizer.num_special_tokens_to_add()` for
-         inputs, and `X` is `output_len` for outputs. 
+         inputs, and `X` is `output_len` for outputs.
          `L_out` is clamped to >= 1.
-      2) Builds a single random prefix of length `prefix_len` **once per call**
-         to `sample(...)` and prepends it to every request.
+      2) Builds a single random prefix of length `prefix_len` once per call to
+         `sample(...)` and prepends it to every request.
       3) Appends a structured “ramp” sequence of token ids:
-         `((offset + index) + arange(L_in)) % vocab_size`,
-         where `offset` is drawn uniformly for each request.
-      4) Decodes the candidate token sequence to text, re-encodes it with
-         `add_special_tokens=False`, truncates to at most
-         `prefix_len + L_in` tokens, and decodes again. The returned
-         `prompt_len` equals the length of this truncated re-encoding.
+         `((offset + index) + arange(L_in)) % vocab_size`.
+      4) Performs buffered canonicalization: decode → re-encode without
+         special tokens. If canonicalized tokens are shorter than the target
+         total (`prefix_len + L_in`), it over-generates a small token-id
+         buffer, decodes and re-encodes again up to `max_iters` retries,
+         extending the ramp deterministically each time. Once the canonical
+         re-encoding length is at least the target, it takes exactly the first
+         `target_total` tokens and decodes.
 
     Notes
     -----
@@ -349,15 +351,24 @@ class RandomDataset(BenchmarkDataset):
       choice so downstream code can add specials without exceeding the intended
       total length. If you will not add specials later, set `input_len`
       accordingly.
-    - The ramp pattern is structured (not i.i.d. uniform) but varies per
-      request via its random `offset`.
+    - Re-encoding always uses `add_special_tokens=False` and decoding uses
+      `clean_up_tokenization_spaces=False` to reduce non-determinism from
+      whitespace cleanup.
+    - There is no general guarantee that buffered canonicalization will exactly
+      hit the target across every tokenizer configuration or normalization
+      setting. It works for typical configurations and falls back to "at most K"
+      behavior when disabled.
+
+    TODO
+    ----
+    - Consider a graph-based canonical subset approach (safe transitions) as a
+      more principled solution for exact-length construction across tokenizers.
 
     Reproducibility
     ---------------
-    Uses a per-instance NumPy Generator
-    (`np.random.default_rng(self.random_seed)`)
-    for all sampling, providing deterministic results without mutating global 
-    RNG state.
+      Uses a per-instance NumPy Generator
+      (`np.random.default_rng(self.random_seed)`) for all sampling, providing
+      deterministic results without mutating global RNG state.
 
     Args:
         tokenizer: Hugging Face tokenizer used for encode/decode. Re-encoding
@@ -367,15 +378,21 @@ class RandomDataset(BenchmarkDataset):
             this batch).
         range_ratio: Relative half-width (b in [0,1)) of the sampling interval.
             Must be < 1.0.
-        input_len: Target **inner** token length (mean of `L_in`), i.e., the
-            length of the ramp before adding the prefix. The final prompt is
-            truncated after re-tokenization to at most `prefix_len + L_in`.
+        input_len: Target input length used to derive the inner ramp length by
+            subtracting `tokenizer.num_special_tokens_to_add()`.
         output_len: Target mean output token length used to sample `L_out`.
+
+        Buffered canonicalization kwargs:
+        - buffer_ratio (float): Proportion of the target total to over-generate.
+          Default 0.15. Set to 0 to disable buffering and revert to "at most K".
+        - min_buffer (int): Minimum over-generation tokens. Default 8.
+        - max_iters (int): Max extension attempts when still short. Default 2.
+        - extra_margin_floor (int): Extra tokens to add per retry. Default 4.
 
     Returns:
         List[SampleRequest]: each with
             - prompt: Decoded prompt text
-            - prompt_len: Actual tokenized length after truncation
+            - prompt_len: Actual tokenized length after canonicalization
             - expected_output_len: Sampled `L_out`
     """
 
@@ -383,6 +400,11 @@ class RandomDataset(BenchmarkDataset):
     DEFAULT_RANGE_RATIO = 0.0
     DEFAULT_INPUT_LEN = 1024
     DEFAULT_OUTPUT_LEN = 128
+    # Buffered canonicalization defaults
+    DEFAULT_BUFFER_RATIO = 0.15
+    DEFAULT_MIN_BUFFER = 16
+    DEFAULT_MAX_ITERS = 4
+    DEFAULT_EXTRA_MARGIN_FLOOR = 8
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -414,10 +436,13 @@ class RandomDataset(BenchmarkDataset):
           interval [floor(X*(1 - range_ratio)), ceil(X*(1 + range_ratio))].
           Must be < 1.0.
         - input_len: Target input token length (including `prefix_len`), before
-          any special tokens. The final prompt is truncated after re-tokenizing
-          to exactly the sampled input length.
+          any special tokens. The final prompt is canonicalized using a buffered
+          decode→encode strategy to reach the exact sampled target when
+          possible.
         - output_len: Target output token length used to set
           `expected_output_len` per request; not used to generate text.
+        - buffer_ratio, min_buffer, max_iters, extra_margin_floor: See class
+          docstring for details.
 
         Returns
         - List of `SampleRequest` with:
@@ -430,10 +455,11 @@ class RandomDataset(BenchmarkDataset):
         - ValueError: if computed sampling intervals are invalid (e.g., empty).
 
         Implementation details
-        - To avoid drift caused by tokenizer merges, the method decodes a
-          candidate prompt, re-encodes without special tokens, truncates to the
-          sampled length, and decodes again to produce the final text. This
-          ensures `prompt_len` matches the sampled token count.
+        - To avoid drift caused by tokenizer merges/normalization, the method
+          decodes a candidate sequence, re-encodes without special tokens, and
+          if under length, over-generates by a small buffer and retries up to a
+          bounded number of times. On success, the canonical re-encoding is
+          sliced to the exact target token count.
         - Logs the input and output sampling intervals at INFO level.
         """
         input_lens, output_lens, offsets = self.get_text_sampling_params(
@@ -444,9 +470,21 @@ class RandomDataset(BenchmarkDataset):
         prefix_token_ids = self.get_prefix(tokenizer, prefix_len)
         vocab_size = tokenizer.vocab_size
 
+        # Buffered canonicalization config
+        buffer_ratio: float = kwargs.get("buffer_ratio",
+                                         self.DEFAULT_BUFFER_RATIO)
+        min_buffer: int = kwargs.get("min_buffer", self.DEFAULT_MIN_BUFFER)
+        max_iters: int = kwargs.get("max_iters", self.DEFAULT_MAX_ITERS)
+        extra_margin_floor: int = kwargs.get(
+            "extra_margin_floor", self.DEFAULT_EXTRA_MARGIN_FLOOR)
+
+        total_retry_requests = 0
+        total_retries = 0
+
         requests = []
         for i in range(num_requests):
-            prompt, total_input_len = self.generate_token_sequence(
+            (prompt, total_input_len, retries_taken) = \
+                self.generate_token_sequence(
                 tokenizer=tokenizer,
                 prefix_token_ids=prefix_token_ids,
                 prefix_len=prefix_len,
@@ -454,6 +492,18 @@ class RandomDataset(BenchmarkDataset):
                 input_len=int(input_lens[i]),
                 offset=int(offsets[i]),
                 index=i,
+                buffer_ratio=buffer_ratio,
+                min_buffer=min_buffer,
+                max_iters=max_iters,
+                extra_margin_floor=extra_margin_floor,
+            )
+            if retries_taken > 0:
+                total_retry_requests += 1
+                total_retries += retries_taken
+            logger.debug(
+                "Buffered canonicalization retries=%d final_prompt_len=%d",
+                retries_taken,
+                total_input_len,
             )
             requests.append(
                 SampleRequest(
@@ -461,6 +511,15 @@ class RandomDataset(BenchmarkDataset):
                     prompt_len=total_input_len,
                     expected_output_len=int(output_lens[i]),
                 )
+            )
+        if total_retry_requests:
+            share = total_retry_requests / max(1, num_requests)
+            logger.debug(
+                "Buffered canonicalization: requests_with_retry=%d (%.2f%%), "
+                "total_retries=%d",
+                total_retry_requests,
+                100.0 * share,
+                total_retries,
             )
         return requests
 
@@ -540,27 +599,93 @@ class RandomDataset(BenchmarkDataset):
         input_len: int,
         offset: int,
         index: int,
-    ) -> tuple[str, int]:
+        buffer_ratio: float,
+        min_buffer: int,
+        max_iters: int,
+        extra_margin_floor: int,
+    ) -> tuple[str, int, int]:
         """
-        Returns (prompt, total_input_len).
+        Construct a candidate sequence and run buffered canonicalization.
+
+        Returns (prompt, total_input_len, retries_taken).
         """
         # Build the deterministic inner sequence by sampling sequentially
-        # from the vocabulary
+        # from the vocabulary. We will extend this sequence in-place if needed.
+        base_inner_len = int(input_len)
         inner_seq = (
-            (offset + index + np.arange(input_len)) % vocab_size
+            (offset + index + np.arange(base_inner_len)) % vocab_size
         ).tolist()
-        token_sequence = prefix_token_ids + inner_seq
 
-        # Decode, then re-encode and truncate to preserve token count invariants
-        prompt = tokenizer.decode(token_sequence)
-        total_input_len = prefix_len + int(input_len)
-        re_encoded_sequence = tokenizer.encode(
-            prompt,
-            add_special_tokens=False,
-        )[:total_input_len]
-        prompt = tokenizer.decode(re_encoded_sequence)
-        total_input_len = len(re_encoded_sequence)
-        return prompt, total_input_len
+        target_total = prefix_len + base_inner_len
+
+        # Fast path: buffering disabled → current "at most K" behavior.
+        if buffer_ratio <= 0.0:
+            token_sequence = prefix_token_ids + inner_seq
+            prompt = tokenizer.decode(
+                token_sequence, clean_up_tokenization_spaces=False)
+            re_encoded_sequence = tokenizer.encode(
+                prompt,
+                add_special_tokens=False,
+            )[:target_total]
+            prompt = tokenizer.decode(
+                re_encoded_sequence, clean_up_tokenization_spaces=False)
+            return prompt, len(re_encoded_sequence), 0
+
+        # Initial over-generation buffer
+        initial_buffer = max(
+            min_buffer, int(round(buffer_ratio * target_total))
+        )
+        if initial_buffer > 0:
+            extension = (
+                (
+                    offset
+                    + index
+                    + np.arange(
+                        base_inner_len,
+                        base_inner_len + initial_buffer,
+                    )
+                )
+                % vocab_size
+            ).tolist()
+            inner_seq.extend(extension)
+
+        retries_taken = 0
+        token_sequence = prefix_token_ids + inner_seq
+        prompt = tokenizer.decode(
+            token_sequence, clean_up_tokenization_spaces=False
+        )
+        canonical_ids = tokenizer.encode(prompt, add_special_tokens=False)
+
+        # If still short after initial buffer, extend with extra margins
+        # up to max_iters.
+        while (len(canonical_ids) < target_total
+               and retries_taken < max_iters):
+            retries_taken += 1
+            extra = max(extra_margin_floor, initial_buffer // 2)
+            # Extend deterministically continuing the ramp
+            start = (
+                base_inner_len + initial_buffer + (retries_taken - 1) * extra
+            )
+            extension = (
+                (offset + index + np.arange(start, start + extra)) % vocab_size
+            ).tolist()
+            inner_seq.extend(extension)
+            token_sequence = prefix_token_ids + inner_seq
+            prompt = tokenizer.decode(
+                token_sequence, clean_up_tokenization_spaces=False)
+            canonical_ids = tokenizer.encode(prompt, add_special_tokens=False)
+
+        # At this point, either canonical_ids is long enough,
+        # or we give the best-effort slice.
+        if len(canonical_ids) >= target_total:
+            canonical_ids = canonical_ids[:target_total]
+        else:
+            # Best-effort: still short; keep current at-most behavior
+            canonical_ids = canonical_ids[:target_total]
+
+        prompt = tokenizer.decode(canonical_ids,
+                                  clean_up_tokenization_spaces=False)
+        return prompt, len(canonical_ids), retries_taken
 
 
 # -----------------------------------------------------------------------------
@@ -725,7 +850,17 @@ class RandomMultiModalDataset(RandomDataset):
         mm_requests = []
         for i in range(num_requests):
             prompt: str | list[dict[str, Any]] = ""
-            prompt, total_input_len = self.generate_token_sequence(
+            # Reuse RandomDataset buffered canonicalization settings
+            buffer_ratio: float = kwargs.get("buffer_ratio",
+                                             self.DEFAULT_BUFFER_RATIO)
+            min_buffer: int = kwargs.get("min_buffer",
+                                         self.DEFAULT_MIN_BUFFER)
+            max_iters: int = kwargs.get("max_iters",
+                                        self.DEFAULT_MAX_ITERS)
+            extra_margin_floor: int = kwargs.get(
+                "extra_margin_floor", self.DEFAULT_EXTRA_MARGIN_FLOOR)
+
+            prompt, total_input_len, _retries = self.generate_token_sequence(
                 tokenizer=tokenizer,
                 prefix_token_ids=prefix_token_ids,
                 prefix_len=prefix_len,
@@ -733,6 +868,10 @@ class RandomMultiModalDataset(RandomDataset):
                 input_len=int(input_lens[i]),
                 offset=int(offsets[i]),
                 index=i,
+                buffer_ratio=buffer_ratio,
+                min_buffer=min_buffer,
+                max_iters=max_iters,
+                extra_margin_floor=extra_margin_floor,
             )
             # Get image dimension iterator for a given request
             image_dimensions_iterator = self.get_image_dimensions_iterator(
