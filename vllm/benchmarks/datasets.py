@@ -842,6 +842,7 @@ class RandomMultiModalDataset(RandomDataset):
         bucket_config: dict[tuple[int, int, int], float] = 
                                         DEFAULT_MM_ITEM_BUCKET_CONFIG,
         enable_multimodal_chat: bool = DEFAULT_ENABLE_MULTIMODAL_CHAT,
+        request_id_prefix: str = "",
         **kwargs,
     ) -> list[SampleRequest]:
 
