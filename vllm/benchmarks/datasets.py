@@ -36,7 +36,6 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.image import convert_image_mode
-from vllm.multimodal.video import Video
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_lora_tokenizer
 from vllm.utils import PlaceholderModule
 
@@ -665,6 +664,10 @@ class RandomMultiModalDataset(RandomDataset):
                              "Bucket config values must be non-zero.")
         # Normalize the remaining bucket config to sum to 1
         total = sum(bucket_config.values())
+        # Raise error if total is 0
+        if total == 0:
+            raise ValueError("Got 0 sum of bucket config values. "
+                             "Bucket config values must sum to non-zero.")
         return {k: v / total for k, v in bucket_config.items()}
 
 
