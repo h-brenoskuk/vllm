@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import argparse
 import asyncio
 import os
 import time
@@ -9,8 +10,8 @@ import numpy as np
 from tqdm.asyncio import tqdm
 
 from vllm import SamplingParams
-from vllm.benchmarks.datasets import (RandomDataset, RandomMultiModalDataset,
-                                      SampleRequest)
+from vllm.benchmarks.datasets import get_samples  # type: ignore
+from vllm.benchmarks.datasets import SampleRequest, add_dataset_parser
 from vllm.utils import random_uuid
 
 # Set environment variable for V1 engine
@@ -323,6 +324,115 @@ async def create_async_llm_engine_with_metrics(
     )
 
 
+def _parse_kv_dict(
+    arg_val: str | None,
+    value_parser=None,
+) -> dict[str, Any] | None:
+    """Parse simple comma-separated k=v pairs into a dict.
+
+    Example: "image=3,video=0" -> {"image": 3, "video": 0}
+    """
+    if arg_val is None:
+        return None
+    result: dict[str, Any] = {}
+    for pair in arg_val.split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+        if "=" not in pair:
+            raise ValueError(f"Invalid k=v pair: {pair}")
+        k, v = pair.split("=", 1)
+        k = k.strip()
+        v = v.strip()
+        if value_parser is not None:
+            result[k] = value_parser(v)
+        else:
+            # Try int -> float -> str
+            try:
+                result[k] = int(v)
+            except ValueError:
+                try:
+                    result[k] = float(v)
+                except ValueError:
+                    # Support true/false
+                    if v.lower() in ("true", "false"):
+                        result[k] = v.lower() == "true"
+                    else:
+                        result[k] = v
+    return result
+
+
+ 
+
+
+def add_cli_args(parser) -> None:
+    # Dataset-related arguments (shared with serve.py)
+    add_dataset_parser(parser)  # type: ignore[arg-type]
+    parser.add_argument(
+        "--endpoint-type",
+        type=str,
+        default="openai-chat",
+        choices=["openai", "openai-chat", "openai-audio"],
+        help=("Endpoint type used only for dataset compatibility checks."),
+    )
+
+    # Traffic/control args
+    parser.add_argument("--request-rate",
+                        type=float,
+                        default=float("inf"),
+                        help="Requests per second. 'inf' sends all at t=0.")
+    parser.add_argument("--max-concurrency",
+                        type=int,
+                        default=32,
+                        help="Max concurrent in-flight requests.")
+    parser.add_argument("--disable-tqdm",
+                        action="store_true",
+                        help="Disable progress bar.")
+    parser.add_argument("--ignore-eos",
+                        action="store_true",
+                        help="Ignore EOS during generation.")
+    parser.add_argument("--request-id-prefix",
+                        type=str,
+                        default="async-llm",
+                        help="Prefix used to assign request IDs.")
+
+    # Sampling params (mirrors serve.py subset)
+    sampling_group = parser.add_argument_group("sampling parameters")
+    sampling_group.add_argument("--top-p", type=float, default=None)
+    sampling_group.add_argument("--top-k", type=int, default=None)
+    sampling_group.add_argument("--min-p", type=float, default=None)
+    sampling_group.add_argument("--temperature", type=float, default=0.0)
+
+    # Engine/model args
+    parser.add_argument("--model", type=str, required=True)
+    parser.add_argument("--tensor-parallel-size", type=int, default=1)
+    parser.add_argument("--pipeline-parallel-size", type=int, default=1)
+    parser.add_argument("--dtype", type=str, default="bfloat16")
+    parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
+    parser.add_argument("--max-model-len", type=int, default=16384)
+    parser.add_argument(
+        "--limit-mm-per-prompt",
+        type=str,
+        default="image=3,video=0",
+        help="Comma-separated k=v, e.g. 'image=3,video=0'",
+    )
+    parser.add_argument(
+        "--mm-processor-kwargs",
+        type=str,
+        default="max_pixels=1003520",
+        help="Comma-separated k=v, e.g. 'max_pixels=1003520'",
+    )
+    parser.add_argument(
+        "--guided-decoding-backend",
+        type=str,
+        default="xgrammar",
+        help="Guided decoding backend name.",
+    )
+    parser.add_argument("--enable-prefix-caching",
+                        action="store_true",
+                        help="Enable prefix caching.")
+
+
 async def get_request(
     input_requests: list[SampleRequest],
     request_rate: float,
@@ -345,30 +455,22 @@ async def get_request(
         await asyncio.sleep(interval)
 
 
-async def benchmark(
-    num_requests: int = 100,
-    prefix_len: int = 0,
-    input_len: int = 100,
-    output_len: int = 10,
-    request_rate: float = float("inf"),
-    max_concurrency: int = 32,
-    disable_tqdm: bool = False,
-    use_multimodal: bool = False,
-    image_width: int = 224,
-    image_height: int = 224,
-    ignore_eos: bool = True,
-):
-    vllm_args = {
-        "model": "Qwen/Qwen2.5-VL-3B-Instruct",
-        "pipeline_parallel_size": 1,
-        "tensor_parallel_size": 1,
-        "dtype": "bfloat16",
-        "gpu_memory_utilization": 0.9,
-        "mm_processor_kwargs": {"max_pixels": 1003520},
-        "guided_decoding_backend": "xgrammar",
-        "limit_mm_per_prompt": {"image": 3, "video": 0},
-        "max_model_len": 16384,
-        "enable_prefix_caching": False,
+async def main_async(args: argparse.Namespace) -> None:
+    # Build engine args from CLI
+    limit_mm_dict = _parse_kv_dict(args.limit_mm_per_prompt) or {}
+    mm_kwargs_dict = _parse_kv_dict(args.mm_processor_kwargs) or {}
+
+    vllm_args: dict[str, Any] = {
+        "model": args.model,
+        "pipeline_parallel_size": args.pipeline_parallel_size,
+        "tensor_parallel_size": args.tensor_parallel_size,
+        "dtype": args.dtype,
+        "gpu_memory_utilization": args.gpu_memory_utilization,
+        "mm_processor_kwargs": mm_kwargs_dict,
+        "guided_decoding_backend": args.guided_decoding_backend,
+        "limit_mm_per_prompt": limit_mm_dict,
+        "max_model_len": args.max_model_len,
+        "enable_prefix_caching": bool(args.enable_prefix_caching),
     }
 
     async_vllm_args = {**vllm_args, "disable_log_requests": True}
@@ -378,36 +480,22 @@ async def benchmark(
         async_vllm_args
     )
 
+    # Tokenizer and (optional) model config for multimodal conversion
     tokenizer = await engine.get_tokenizer()
+    model_config = await engine.get_model_config()
 
-    if use_multimodal:
-        mm_dataset_generator = RandomMultiModalDataset(random_seed=42)
-        random_dataset = mm_dataset_generator.sample(
-            tokenizer=cast(PreTrainedTokenizerBase, tokenizer),
-            num_requests=num_requests,
-            prefix_len=prefix_len,
-            input_len=input_len,
-            output_len=output_len,
-            width=image_width,
-            height=image_height,
-        )
-    else:
-        text_dataset_generator = RandomDataset(random_seed=42)
-        random_dataset = text_dataset_generator.sample(
-            tokenizer=cast(PreTrainedTokenizerBase, tokenizer),
-            num_requests=num_requests,
-            prefix_len=prefix_len,
-            input_len=input_len,
-            output_len=output_len,
-        )
+    # Build input requests via the shared dataset loader
+    input_requests = get_samples(args, cast(PreTrainedTokenizerBase, tokenizer))
 
-    print(f"Traffic request rate: {request_rate}")
-    print(f"Maximum request concurrency: {max_concurrency}")
+    num_requests = len(input_requests)
+    print(f"Traffic request rate: {args.request_rate}")
+    print(f"Maximum request concurrency: {args.max_concurrency}")
 
     # Create progress bar
-    pbar = None if disable_tqdm else tqdm(total=num_requests)
+    pbar = None if args.disable_tqdm else tqdm(total=num_requests)
 
-    semaphore = asyncio.Semaphore(max_concurrency) if max_concurrency else None
+    semaphore = (asyncio.Semaphore(args.max_concurrency)
+                 if args.max_concurrency else None)
 
     # Start metrics collection
     metrics_collector.start_benchmark()
@@ -419,22 +507,22 @@ async def benchmark(
     ):
         try:
             # Create sampling parameters with the expected output length
-            sampling_params = SamplingParams(
-                max_tokens=request_func_input.expected_output_len,
-                temperature=0.0,  # Greedy decoding for consistency
-                ignore_eos=ignore_eos,
-            )
+            sp_kwargs: dict[str, Any] = {
+                "max_tokens": request_func_input.expected_output_len,
+                "temperature": args.temperature,
+                "ignore_eos": args.ignore_eos,
+            }
+            if args.top_p is not None:
+                sp_kwargs["top_p"] = args.top_p
+            if args.top_k is not None:
+                sp_kwargs["top_k"] = args.top_k
+            if args.min_p is not None:
+                sp_kwargs["min_p"] = args.min_p
+            sampling_params = SamplingParams(**sp_kwargs)
 
-            # Use vLLM's native conversion pipeline from OpenAI format to
-            # internal format
-            # Prepare prompt
-            prompt_to_generate: Any = None
-            if use_multimodal and request_func_input.multi_modal_data:
-                # Get model config from the engine for proper conversion
-                model_config = await engine.get_model_config()
-                tokenizer = await engine.get_tokenizer()
-
-                # Convert using vLLM's built-in functions
+            # Prepare prompt; convert multimodal OpenAI-like content
+            prompt_to_generate: Any
+            if request_func_input.multi_modal_data:
                 converted = convert_openai_to_vllm_format(
                     request_func_input, model_config, tokenizer
                 )
@@ -479,17 +567,14 @@ async def benchmark(
 
     benchmark_start_time = time.perf_counter()
     tasks: list[asyncio.Task] = []
-    async for request in get_request(random_dataset, request_rate):
-        request_func_input = request
+    async for request in get_request(input_requests, args.request_rate):
         tasks.append(
             asyncio.create_task(
-                limited_request_func(
-                    request_func_input=request_func_input, pbar=pbar
-                )
+                limited_request_func(request_func_input=request, pbar=pbar)
             )
         )
 
-    outputs: list[list[str]] = await asyncio.gather(*tasks)
+    _ = await asyncio.gather(*tasks)
     elapsed_time = time.perf_counter() - benchmark_start_time
 
     # End metrics collection
@@ -503,35 +588,36 @@ async def benchmark(
     # Print detailed metrics
     print()  # Add some space
     metrics_collector.print_metrics()
-    return outputs
+
+
+"""
+python3 benchmarks/async_llm.py \
+  --model Qwen/Qwen2.5-VL-3B-Instruct \
+  --tensor-parallel-size 1 \
+  --pipeline-parallel-size 1 \
+  --dtype bfloat16 \
+  --gpu-memory-utilization 0.9 \
+  --max-model-len 16384 \
+  --limit-mm-per-prompt "image=3,video=0" \
+  --mm-processor-kwargs "max_pixels=1003520" \
+  --guided-decoding-backend xgrammar \
+  --dataset-name random \
+  --num-prompts 100 \
+  --max-concurrency 10 \
+  --random-input-len 300 \
+  --random-output-len 40 \
+  --random-range-ratio 0 \
+  --request-rate inf \
+  --ignore-eos \
+  --endpoint-type openai-chat \
+  --seed 42
+"""
+
+
 
 
 if __name__ == "__main__":
-    # Simple test with default parameters
-    # print("Running text-only benchmark...")
-    # asyncio.run(
-    #    benchmark(
-    #        num_requests=5,  # Small number for quick testing
-    #        input_len=100,
-    #        output_len=20,
-    #        disable_tqdm=False,
-    #        use_multimodal=False,
-    #    )
-    # )
-
-    # print("\n" + "="*50 + "\n")
-
-    # Test multimodal benchmark
-    print("Running multimodal benchmark...")
-    asyncio.run(
-        benchmark(
-            num_requests=100,
-            max_concurrency=32,
-            input_len=512,
-            output_len=32,
-            disable_tqdm=False,
-            use_multimodal=True,
-            image_width=224,
-            image_height=224,
-        )
-    )
+    parser = argparse.ArgumentParser()
+    add_cli_args(parser)
+    args = parser.parse_args()
+    asyncio.run(main_async(args))
