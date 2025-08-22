@@ -1,0 +1,58 @@
+engine:
+  model: Qwen/Qwen2.5-VL-3B-Instruct
+  tensor-parallel-size: 1
+  pipeline-parallel-size: 1
+  dtype: bfloat16
+  gpu-memory-utilization: 0.9
+  max-model-len: 16384
+  limit-mm-per-prompt: "image=3,video=0"
+  mm-processor-kwargs: "max_pixels=1003520"
+  guided-decoding-backend: xgrammar
+  enable-prefix-caching: false
+
+experiments:
+  - name: random-99
+    overrides:
+      dataset-name: random
+      num-prompts: 99
+      max-concurrency: 10
+      random-prefix-len: 25
+      random-input-len: 300
+      random-output-len: 40
+      random-range-ratio: 0.2
+      request-rate: inf
+      ignore-eos: true
+      endpoint-type: openai-chat
+      seed: 43
+      
+  - name: random-100
+    overrides:
+      dataset-name: random
+      num-prompts: 100
+      max-concurrency: 10
+      random-prefix-len: 25
+      random-input-len: 300
+      random-output-len: 40
+      random-range-ratio: 0.2
+      request-rate: inf
+      ignore-eos: true
+      endpoint-type: openai-chat
+      seed: 42
+
+  - name: random-mm-100
+    overrides:
+      dataset-name: random-mm
+      num-prompts: 100
+      max-concurrency: 10
+      random-prefix-len: 25
+      random-input-len: 300
+      random-output-len: 40
+      random-range-ratio: 0.2
+      random-mm-base-items-per-request: 2
+      random-mm-num-mm-items-range-ratio: 0
+      random-mm-limit-mm-per-prompt: '{"image":3,"video":0}'
+      random-mm-bucket-config: '{(256, 256, 1): 0.5, (720, 1280, 1): 0.5}'
+      request-rate: inf
+      ignore-eos: true
+      endpoint-type: openai-chat
+      seed: 42

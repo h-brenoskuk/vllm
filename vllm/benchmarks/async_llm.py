@@ -2,9 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
 import asyncio
+import json
 import os
 import time
 from collections.abc import AsyncGenerator, Iterable
+from contextlib import suppress
+from copy import deepcopy
 
 import numpy as np
 from tqdm.asyncio import tqdm
@@ -28,6 +31,11 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.loggers import StatLoggerBase
 from vllm.v1.metrics.stats import (FinishedRequestStats, IterationStats,
                                    SchedulerStats)
+
+try:
+    import yaml  # type: ignore
+except Exception:  # pragma: no cover - optional dependency for YAML configs
+    yaml = None  # type: ignore
 
 
 def convert_openai_to_vllm_format(
@@ -362,7 +370,161 @@ def _parse_kv_dict(
     return result
 
 
- 
+def _normalize_kv_input(val: Any) -> dict[str, Any]:
+    """Normalize CLI/YAML kv inputs into dictionaries.
+
+    Accepts either a dict (returned as-is), a JSON/k=v string, or None.
+    """
+    if val is None:
+        return {}
+    if isinstance(val, dict):
+        return val
+    if isinstance(val, str):
+        s = val.strip()
+        # Try JSON first
+        if s.startswith("{") and s.endswith("}"):
+            try:
+                return cast(dict[str, Any], json.loads(s))
+            except Exception:
+                pass
+        # Fallback to simple k=v parsing
+        try:
+            return _parse_kv_dict(s) or {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _parse_mm_bucket_config_value(v: Any) -> dict[tuple[int, int, int], float]:
+    """Parse random-mm bucket config from YAML overrides.
+
+    Supports dict with tuple or string keys, or a string that can be
+    ast.literal_eval'ed into a dict.
+    """
+    import ast as _ast  # local import to avoid global namespace clutter
+
+    def _normalize(d: dict) -> dict[tuple[int, int, int], float]:
+        out: dict[tuple[int, int, int], float] = {}
+        for k, val in d.items():
+            key: Any = k
+            if isinstance(key, str):
+                with suppress(Exception):
+                    key = _ast.literal_eval(key)
+            if not (
+                isinstance(key, tuple) and len(key) == 3 and
+                all(isinstance(x, int) for x in key)
+            ):
+                raise ValueError(
+                    f"Invalid bucket key {k!r}. Expected tuple (H, W, T)."
+                )
+            out[(int(key[0]), int(key[1]), int(key[2]))] = float(val)
+        return out
+
+    if isinstance(v, dict):
+        return _normalize(v)
+    if isinstance(v, str):
+        with suppress(Exception):
+            parsed = _ast.literal_eval(v)
+            if isinstance(parsed, dict):
+                return _normalize(parsed)
+        raise ValueError(
+            "Unsupported value for random_mm_bucket_config override."
+        )
+    raise ValueError(
+        "random_mm_bucket_config override must be dict or string."
+    )
+
+
+def _coerce_override_value(key: str, value: Any) -> Any:
+    """Coerce YAML override values to expected CLI types.
+
+    Handles common numeric and boolean fields so downstream code
+    receives the correct types (e.g., request_rate as float).
+    """
+    float_keys = {
+        "request_rate",
+        "top_p",
+        "min_p",
+        "temperature",
+        "gpu_memory_utilization",
+    }
+    int_keys = {
+        "max_concurrency",
+        "tensor_parallel_size",
+        "pipeline_parallel_size",
+        "max_model_len",
+        "top_k",
+        "num_prompts",
+    }
+    bool_keys = {"ignore_eos", "enable_prefix_caching", "disable_tqdm"}
+
+    # Dataset-related numeric fields
+    float_keys.update({
+        "random_mm_num_mm_items_range_ratio",
+        "random_range_ratio",
+    })
+    int_keys.update({
+        "random_mm_base_items_per_request",
+        "random_prefix_len",
+        "random_input_len",
+        "random_output_len",
+        "num_prompts",
+    })
+
+    if key in float_keys:
+        if isinstance(value, str):
+            v = value.strip().lower()
+            if v in {"inf", "+inf", "infinity", "+infinity"}:
+                return float("inf")
+            if v in {"-inf", "-infinity"}:
+                return float("-inf")
+            try:
+                return float(value)
+            except Exception:
+                return value
+        try:
+            return float(value)
+        except Exception:
+            return value
+
+    if key in int_keys:
+        try:
+            return int(value)
+        except Exception:
+            return value
+
+    if key in bool_keys:
+        if isinstance(value, str):
+            return value.strip().lower() == "true"
+        return bool(value)
+
+    # Dict-like overrides that may arrive as JSON or k=v strings
+    if key in {"mm_processor_kwargs", "limit_mm_per_prompt"}:
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            return _normalize_kv_input(value)
+        return value
+
+    # Multimodal dataset dict overrides
+    if key == "random_mm_limit_mm_per_prompt":
+        if isinstance(value, dict):
+            return {str(k): int(v) for k, v in value.items()}
+        if isinstance(value, str):
+            try:
+                d = cast(dict[str, Any], json.loads(value))
+            except Exception:
+                d = _normalize_kv_input(value)
+            return {str(k): int(v) for k, v in d.items()}
+        return value
+
+    if key == "random_mm_bucket_config":
+        try:
+            return _parse_mm_bucket_config_value(value)
+        except Exception:
+            return value
+
+    return value
 
 
 def add_cli_args(parser) -> None:
@@ -395,6 +557,15 @@ def add_cli_args(parser) -> None:
                         type=str,
                         default="async-llm",
                         help="Prefix used to assign request IDs.")
+    parser.add_argument(
+        "--config-yaml",
+        type=str,
+        default=None,
+        help=(
+            "Path to a YAML file describing multiple experiments to run "
+            "sequentially. If provided, overrides CLI single-run mode."
+        ),
+    )
 
     # Sampling params (mirrors serve.py subset)
     sampling_group = parser.add_argument_group("sampling parameters")
@@ -404,7 +575,15 @@ def add_cli_args(parser) -> None:
     sampling_group.add_argument("--temperature", type=float, default=0.0)
 
     # Engine/model args
-    parser.add_argument("--model", type=str, required=True)
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help=(
+            "Name or path of the model. Required unless --config-yaml is "
+            "provided with an 'engine.model' key."
+        ),
+    )
     parser.add_argument("--tensor-parallel-size", type=int, default=1)
     parser.add_argument("--pipeline-parallel-size", type=int, default=1)
     parser.add_argument("--dtype", type=str, default="bfloat16")
@@ -456,9 +635,27 @@ async def get_request(
 
 
 async def main_async(args: argparse.Namespace) -> None:
-    # Build engine args from CLI
-    limit_mm_dict = _parse_kv_dict(args.limit_mm_per_prompt) or {}
-    mm_kwargs_dict = _parse_kv_dict(args.mm_processor_kwargs) or {}
+    # Enforce that a model is provided in single-run mode.
+    if (not getattr(args, "config_yaml", None)
+            and not getattr(args, "model", None)):
+        raise SystemExit(
+            "Missing --model. Provide --model for single-run CLI or use "
+            "--config-yaml with an 'engine.model' or per-experiment 'model' "
+            "override."
+        )
+    # If a YAML config is provided, use the BenchmarkManager path
+    if getattr(args, "config_yaml", None):
+        if yaml is None:
+            raise RuntimeError(
+                "PyYAML is required for --config-yaml but not installed. "
+                "Install pyyaml or remove --config-yaml."
+            )
+        manager = BenchmarkManager()
+        await manager.run_from_yaml(args)
+        return
+    # Build engine args from CLI/YAML (normalize both string and dict)
+    limit_mm_dict = _normalize_kv_input(args.limit_mm_per_prompt)
+    mm_kwargs_dict = _normalize_kv_input(args.mm_processor_kwargs)
 
     vllm_args: dict[str, Any] = {
         "model": args.model,
@@ -598,6 +795,316 @@ async def main_async(args: argparse.Namespace) -> None:
     metrics_collector.print_metrics()
 
 
+async def run_single_experiment(
+    args: argparse.Namespace,
+    engine: AsyncLLM | None = None,
+    metrics_collector: BenchmarkMetricsCollector | None = None,
+) -> tuple[AsyncLLM, BenchmarkMetricsCollector]:
+    """Run one experiment, optionally reusing an existing engine.
+
+    Returns engine and metrics collector (for reuse).
+    """
+    # Build engine args from CLI/YAML (normalize both string and dict)
+    limit_mm_dict = _normalize_kv_input(args.limit_mm_per_prompt)
+    mm_kwargs_dict = _normalize_kv_input(args.mm_processor_kwargs)
+
+    vllm_args: dict[str, Any] = {
+        "model": args.model,
+        "pipeline_parallel_size": args.pipeline_parallel_size,
+        "tensor_parallel_size": args.tensor_parallel_size,
+        "dtype": args.dtype,
+        "gpu_memory_utilization": args.gpu_memory_utilization,
+        "mm_processor_kwargs": mm_kwargs_dict,
+        "guided_decoding_backend": args.guided_decoding_backend,
+        "limit_mm_per_prompt": limit_mm_dict,
+        "max_model_len": args.max_model_len,
+        "enable_prefix_caching": bool(args.enable_prefix_caching),
+    }
+
+    # Create or reuse engine with metrics collection
+    if engine is None or metrics_collector is None:
+        async_vllm_args = {**vllm_args, "disable_log_requests": True}
+        engine, metrics_collector = await create_async_llm_engine_with_metrics(
+            async_vllm_args
+        )
+
+    assert engine is not None and metrics_collector is not None
+
+    # Tokenizer and (optional) model config for multimodal conversion
+    tokenizer = await engine.get_tokenizer()
+    model_config = await engine.get_model_config()
+
+    # Build input requests via the shared dataset loader
+    input_requests = get_samples(args, cast(PreTrainedTokenizerBase, tokenizer))
+
+    total_requests = len(input_requests)
+    print(f"Traffic request rate: {args.request_rate}")
+    print(f"Maximum request concurrency: {args.max_concurrency}")
+
+    # Concurrency limiter
+    semaphore = (asyncio.Semaphore(args.max_concurrency)
+                 if args.max_concurrency else None)
+
+    # request calls the async engine generate method
+    async def request_func(
+        request_func_input: SampleRequest,
+        pbar: tqdm | None,
+    ):
+        try:
+            # Create sampling parameters with the expected output length
+            sp_kwargs: dict[str, Any] = {
+                "max_tokens": request_func_input.expected_output_len,
+                "temperature": args.temperature,
+                "ignore_eos": args.ignore_eos,
+            }
+            if args.top_p is not None:
+                sp_kwargs["top_p"] = args.top_p
+            if args.top_k is not None:
+                sp_kwargs["top_k"] = args.top_k
+            if args.min_p is not None:
+                sp_kwargs["min_p"] = args.min_p
+            sampling_params = SamplingParams(**sp_kwargs)
+
+            # Prepare prompt; convert multimodal OpenAI-like content
+            prompt_to_generate: Any
+            if request_func_input.multi_modal_data:
+                converted = convert_openai_to_vllm_format(
+                    request_func_input, model_config, tokenizer
+                )
+                prompt_to_generate = converted
+            else:
+                prompt_to_generate = request_func_input.prompt
+
+            # Generate using the async engine
+            outputs = []
+            async for output in engine.generate(
+                prompt=cast(Any, prompt_to_generate),
+                sampling_params=sampling_params,
+                request_id=random_uuid(),
+            ):
+                outputs.append(output)
+
+            # Update progress bar
+            if pbar is not None:
+                pbar.update(1)
+
+            # Return the final output (complete generation)
+            return outputs[-1] if outputs else None
+
+        except Exception as e:
+            if pbar is not None:
+                pbar.update(1)
+            print(f"Exception occurred: {type(e).__name__}: {str(e)}")
+            import traceback
+
+            traceback.print_exc()
+            return f"Error: {str(e)}"
+
+    # Readiness/warmup run using the first request (mirrors serve.py behavior)
+    if total_requests > 0:
+        # This mirrors the behavior of serve.py
+        print("Starting initial single prompt test run...")
+        first_req = input_requests[0]
+        await request_func(request_func_input=first_req, pbar=None)
+        print("Initial test run completed. Starting main benchmark run...")
+
+    # Create progress bar for measured run over full dataset (including first)
+    pbar = None if args.disable_tqdm else tqdm(total=total_requests)
+    async def limited_request_func(request_func_input, pbar):
+        if semaphore is None:
+            return await request_func(
+                request_func_input=request_func_input, pbar=pbar
+            )
+        async with semaphore:
+            return await request_func(
+                request_func_input=request_func_input, pbar=pbar
+            )
+
+    # Start metrics collection
+    metrics_collector.start_benchmark()
+
+    benchmark_start_time = time.perf_counter()
+    tasks: list[asyncio.Task] = []
+    async for request in get_request(input_requests, args.request_rate):
+        tasks.append(
+            asyncio.create_task(
+                limited_request_func(request_func_input=request, pbar=pbar)
+            )
+        )
+
+    _ = await asyncio.gather(*tasks)
+    elapsed_time = time.perf_counter() - benchmark_start_time
+
+    # End metrics collection
+    metrics_collector.end_benchmark()
+
+    print(f"Benchmark completed in {elapsed_time:.2f} seconds")
+
+    if pbar is not None:
+        pbar.close()
+
+    # Print detailed metrics
+    print()  # Add some space
+    metrics_collector.print_metrics()
+
+    return engine, metrics_collector
+
+
+class BenchmarkManager:
+    """Run multiple experiments sequentially with engine reuse.
+
+    YAML schema (example):
+      experiments:
+        - name: run1
+          overrides:
+            model: meta-llama/Llama-3-8B-Instruct
+            dataset_name: random
+            num_prompts: 100
+            request_rate: 10
+            max_concurrency: 16
+            top_p: 0.9
+        - name: run2
+          overrides:
+            request_rate: 20
+            temperature: 0.0
+    """
+
+    def __init__(self) -> None:
+        # Maintain a single active engine to prevent GPU memory blowup
+        self._active_key: str | None = None
+        self._active_engine: (
+            tuple[AsyncLLM, BenchmarkMetricsCollector] | None
+        ) = (None)
+
+    def _engine_key_from_args(self, args: argparse.Namespace) -> str:
+        # Keys that affect engine instantiation
+        engine_keys = [
+            "model",
+            "pipeline_parallel_size",
+            "tensor_parallel_size",
+            "dtype",
+            "gpu_memory_utilization",
+            "mm_processor_kwargs",
+            "guided_decoding_backend",
+            "limit_mm_per_prompt",
+            "max_model_len",
+            "enable_prefix_caching",
+        ]
+        engine_cfg = {k: getattr(args, k, None) for k in engine_keys}
+        # Normalize embedded dict-like strings into dicts
+        engine_cfg["mm_processor_kwargs"] = _normalize_kv_input(
+            getattr(args, "mm_processor_kwargs", None)
+        )
+        engine_cfg["limit_mm_per_prompt"] = _normalize_kv_input(
+            getattr(args, "limit_mm_per_prompt", None)
+        )
+        return json.dumps(engine_cfg, sort_keys=True)
+
+    def _apply_overrides(self, base_args: argparse.Namespace,
+                         overrides: dict[str, Any]) -> argparse.Namespace:
+        new_args = deepcopy(base_args)
+        for k, v in overrides.items():
+            # support kebab-case in YAML by converting to underscore
+            attr = k.replace("-", "_")
+            # quick solution to convert string to int, float, bool, etc.
+            # TODO: improve this (use BaseModel)
+            coerced = _coerce_override_value(attr, v)
+            setattr(new_args, attr, coerced)
+        return new_args
+
+    async def run_from_yaml(self, base_args: argparse.Namespace) -> None:
+        assert base_args.config_yaml is not None
+        with open(base_args.config_yaml, encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        if isinstance(cfg, dict):
+            engine_overrides = cfg.get("engine", {}) or {}
+            experiments = cfg.get("experiments", [])
+        else:
+            engine_overrides = {}
+            experiments = cfg
+        if not isinstance(experiments, list):
+            raise ValueError(
+                "YAML must define an 'experiments' list or be a list")
+        # Apply top-level engine overrides once (single engine across runs)
+        if engine_overrides:
+            normalized_engine_overrides = {
+                k.replace("-", "_"): v
+                for k, v in engine_overrides.items()
+            }
+            base_args = self._apply_overrides(
+                base_args, normalized_engine_overrides)
+
+        for idx, exp in enumerate(experiments):
+            name = (
+                exp.get("name", f"exp-{idx}")
+                if isinstance(exp, dict) else f"exp-{idx}"
+            )
+            overrides = (
+                exp.get("overrides", {}) if isinstance(exp, dict) else {}
+            )
+            # Ensure a model is defined either at top-level engine config or
+            # per-experiment overrides.
+            model_in_engine = engine_overrides.get("model") if isinstance(
+                engine_overrides, dict) else None
+            model_in_exp = overrides.get("model") if isinstance(
+                overrides, dict) else None
+            if model_in_engine is None and model_in_exp is None and not getattr(
+                    base_args, "model", None):
+                raise ValueError(
+                    "Model must be specified for YAML runs via either a top-"
+                    "level 'engine.model', a per-experiment 'model' override,"
+                    " or the CLI '--model'."
+                )
+            # When top-level engine exists, prevent per-experiment engine
+            # overrides
+            if engine_overrides:
+                engine_keys = {
+                    "model", "pipeline_parallel_size", "tensor_parallel_size",
+                    "dtype", "gpu_memory_utilization", "mm_processor_kwargs",
+                    "guided_decoding_backend", "limit_mm_per_prompt",
+                    "max_model_len", "enable_prefix_caching",
+                }
+                disallowed = [
+                    k for k in overrides
+                    if k.replace("-", "_") in engine_keys
+                ]
+                if disallowed:
+                    raise ValueError(
+                        "Per-experiment overrides must not include engine "
+                        "keys when a top-level 'engine' section is used. "
+                        "Remove: " + ", ".join(disallowed)
+                    )
+            print("=" * 50)
+            print(f"Starting experiment: {name}")
+            exp_args = self._apply_overrides(base_args, overrides)
+
+            engine_key = self._engine_key_from_args(exp_args)
+            # Reuse engine if key matches; otherwise shutdown and create new
+            if self._active_engine is None or self._active_key != engine_key:
+                # Shutdown previous engine if exists
+                if self._active_engine is not None:
+                    with suppress(Exception):
+                        self._active_engine[0].shutdown()
+                engine, metrics_collector = await run_single_experiment(
+                    exp_args)
+                self._active_engine = (engine, metrics_collector)
+                self._active_key = engine_key
+            else:
+                engine, metrics_collector = self._active_engine
+                await run_single_experiment(
+                    exp_args, engine, metrics_collector
+                )
+
+        # Cleanup active engine after all experiments finish
+        if self._active_engine is not None:
+            with suppress(Exception):
+                self._active_engine[0].shutdown()
+            self._active_engine = None
+            self._active_key = None
+
+        print("All experiments completed.")
+
+
 """
 python3 benchmarks/async_llm.py \
     --model Qwen/Qwen2.5-VL-3B-Instruct \
@@ -648,6 +1155,11 @@ python3 benchmarks/async_llm.py \
     --ignore-eos \
     --endpoint-type openai-chat \
     --seed 42 
+"""
+
+"""
+python3 benchmarks/async_llm.py --config-yaml \
+    benchmarks/config.yaml
 """
 
 
