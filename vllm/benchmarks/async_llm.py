@@ -487,18 +487,13 @@ async def main_async(args: argparse.Namespace) -> None:
     # Build input requests via the shared dataset loader
     input_requests = get_samples(args, cast(PreTrainedTokenizerBase, tokenizer))
 
-    num_requests = len(input_requests)
+    total_requests = len(input_requests)
     print(f"Traffic request rate: {args.request_rate}")
     print(f"Maximum request concurrency: {args.max_concurrency}")
 
-    # Create progress bar
-    pbar = None if args.disable_tqdm else tqdm(total=num_requests)
-
+    # Concurrency limiter
     semaphore = (asyncio.Semaphore(args.max_concurrency)
                  if args.max_concurrency else None)
-
-    # Start metrics collection
-    metrics_collector.start_benchmark()
 
     # request calls the async engine generate method
     async def request_func(
@@ -555,6 +550,16 @@ async def main_async(args: argparse.Namespace) -> None:
             traceback.print_exc()
             return f"Error: {str(e)}"
 
+    # Readiness/warmup run using the first request (mirrors serve.py behavior)
+    if total_requests > 0:
+        # This mirrors the behavior of serve.py
+        print("Starting initial single prompt test run...")
+        first_req = input_requests[0]
+        await request_func(request_func_input=first_req, pbar=None)
+        print("Initial test run completed. Starting main benchmark run...")
+
+    # Create progress bar for measured run over full dataset (including first)
+    pbar = None if args.disable_tqdm else tqdm(total=total_requests)
     async def limited_request_func(request_func_input, pbar):
         if semaphore is None:
             return await request_func(
@@ -564,6 +569,9 @@ async def main_async(args: argparse.Namespace) -> None:
             return await request_func(
                 request_func_input=request_func_input, pbar=pbar
             )
+
+    # Start metrics collection
+    metrics_collector.start_benchmark()
 
     benchmark_start_time = time.perf_counter()
     tasks: list[asyncio.Task] = []
@@ -592,25 +600,54 @@ async def main_async(args: argparse.Namespace) -> None:
 
 """
 python3 benchmarks/async_llm.py \
-  --model Qwen/Qwen2.5-VL-3B-Instruct \
-  --tensor-parallel-size 1 \
-  --pipeline-parallel-size 1 \
-  --dtype bfloat16 \
-  --gpu-memory-utilization 0.9 \
-  --max-model-len 16384 \
-  --limit-mm-per-prompt "image=3,video=0" \
-  --mm-processor-kwargs "max_pixels=1003520" \
-  --guided-decoding-backend xgrammar \
-  --dataset-name random \
-  --num-prompts 100 \
-  --max-concurrency 10 \
-  --random-input-len 300 \
-  --random-output-len 40 \
-  --random-range-ratio 0 \
-  --request-rate inf \
-  --ignore-eos \
-  --endpoint-type openai-chat \
-  --seed 42
+    --model Qwen/Qwen2.5-VL-3B-Instruct \
+    --tensor-parallel-size 1 \
+    --pipeline-parallel-size 1 \
+    --dtype bfloat16 \
+    --gpu-memory-utilization 0.9 \
+    --max-model-len 16384 \
+    --limit-mm-per-prompt "image=3,video=0" \
+    --mm-processor-kwargs "max_pixels=1003520" \
+    --guided-decoding-backend xgrammar \
+    --dataset-name random \
+    --num-prompts 100 \
+    --max-concurrency 10 \
+    --random-prefix-len 25 \
+    --random-input-len 300 \
+    --random-output-len 40 \
+    --random-range-ratio 0.2 \
+    --request-rate inf \
+    --ignore-eos \
+    --endpoint-type openai-chat \
+    --seed 42
+"""
+
+"""
+python3 benchmarks/async_llm.py \
+    --model Qwen/Qwen2.5-VL-3B-Instruct \
+    --tensor-parallel-size 1 \
+    --pipeline-parallel-size 1 \
+    --dtype bfloat16 \
+    --gpu-memory-utilization 0.9 \
+    --max-model-len 16384 \
+    --limit-mm-per-prompt "image=3,video=0" \
+    --mm-processor-kwargs "max_pixels=1003520" \
+    --guided-decoding-backend xgrammar \
+    --dataset-name random-mm \
+    --num-prompts 100 \
+    --max-concurrency 10 \
+    --random-prefix-len 25 \
+    --random-input-len 300 \
+    --random-output-len 40 \
+    --random-range-ratio 0.2 \
+    --random-mm-base-items-per-request 2 \
+    --random-mm-num-mm-items-range-ratio 0 \
+    --random-mm-limit-mm-per-prompt '{"image":3,"video":0}' \
+    --random-mm-bucket-config '{(256, 256, 1): 0.25, (720, 1280, 1): 0.75}' \
+    --request-rate inf \
+    --ignore-eos \
+    --endpoint-type openai-chat \
+    --seed 42 
 """
 
 
