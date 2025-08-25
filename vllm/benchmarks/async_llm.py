@@ -171,12 +171,11 @@ class BenchmarkMetricsCollector(StatLoggerBase):
             return
 
         # Collect timing data
+        # This is mirroring the  e2e benchmark at serve.py.
+        # TPOT is calculated at serve.py as (latency - TTFT) / (N - 1)
+        # ITL is calculated at lib/endpoint_request_func.py as
+        # the interval between consecutive chunks.
         self.ttft_values.extend(iteration_stats.time_to_first_tokens_iter)
-        self.tpot_values.extend(iteration_stats.time_per_output_tokens_iter)
-
-        # Inter-token latency is roughly the same as TPOT for our purposes
-        # In the real serve.py, ITL is calculated differently
-        # but this gives similar insights
         self.itl_values.extend(iteration_stats.time_per_output_tokens_iter)
 
         # Collect token counts
@@ -217,7 +216,16 @@ class BenchmarkMetricsCollector(StatLoggerBase):
 
         # Convert timing values from seconds to milliseconds
         ttft_ms = [t * 1000 for t in self.ttft_values]
-        tpot_ms = [t * 1000 for t in self.tpot_values]
+
+        # Compute per-request TPOT from finished requests at end of run.
+        # TPOT (excluding first token) is decode_time / (gen_tokens - 1).
+        per_request_tpot_s = [
+            fr.decode_time / (fr.num_generation_tokens - 1)
+            for fr in self.finished_requests
+            if fr.num_generation_tokens > 1 and fr.decode_time > 0
+        ]
+        tpot_ms = [t * 1000 for t in per_request_tpot_s]
+        # ITL distribution comes from inter-token (inter-yield) latencies
         itl_ms = [t * 1000 for t in self.itl_values]
 
         # Calculate throughput metrics
