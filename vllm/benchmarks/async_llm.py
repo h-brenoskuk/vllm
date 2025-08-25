@@ -901,7 +901,35 @@ class BenchmarkManager:
         # Engine is created in run_from_yaml (async context)
         pass
 
-    
+    # Only allow experiments to change traffic/sampling knobs.
+    # Engine and dataset parameters are immutable per config.
+    _ALLOWED_EXPERIMENT_ARG_KEYS: set[str] = {
+        "max_concurrency",
+        "request_rate",
+        "ignore_eos",
+        "disable_tqdm",
+        # sampling
+        "top_p",
+        "top_k",
+        "min_p",
+        "temperature",
+        # optional utility
+        "request_id_prefix",
+    }
+
+    def _apply_experiment_args(self, base_args: argparse.Namespace,
+                               exp_args: dict[str, Any]) -> argparse.Namespace:
+        """Apply only allowed experiment-level args.
+
+        Ignores any keys outside _ALLOWED_EXPERIMENT_ARG_KEYS to avoid
+        overriding engine or dataset configuration.
+        """
+        new_args = deepcopy(base_args)
+        for k, v in (exp_args or {}).items():
+            attr = k.replace("-", "_")
+            if attr in self._ALLOWED_EXPERIMENT_ARG_KEYS:
+                setattr(new_args, attr, _coerce_override_value(attr, v))
+        return new_args
 
     def _apply_overrides(self, base_args: argparse.Namespace,
                          overrides: dict[str, Any]) -> argparse.Namespace:
@@ -961,72 +989,73 @@ class BenchmarkManager:
             engine_args_dict
         )
 
-        # Track the currently loaded dataset by name and its sampled requests
-        current_dataset_name: str | None = None
-        current_requests: list[SampleRequest] | None = None
-
+        # Group experiments by dataset to avoid re-sampling and ensure
+        # dataset config is the single source of truth.
+        experiments_by_dataset: dict[str, list[dict[str, Any]]] = {}
         for idx, exp in enumerate(experiments):
             if not isinstance(exp, dict):
                 raise ValueError("Each experiment entry must be a mapping")
-
-            name = exp.get("name", f"exp-{idx}")
             dataset_name = exp.get("dataset")
             if not dataset_name:
+                name = exp.get("name", f"exp-{idx}")
                 raise ValueError(
                     f"Experiment '{name}' missing required 'dataset' key")
             if dataset_name not in datasets_map:
+                name = exp.get("name", f"exp-{idx}")
                 raise ValueError(
                     f"Experiment '{name}' references unknown dataset "
                     f"'{dataset_name}'")
+            experiments_by_dataset.setdefault(dataset_name, []).append(exp)
 
-            dataset_overrides = datasets_map.get(dataset_name, {}) or {}
-            exp_overrides = exp.get("args", {}) or {}
+        # Iterate datasets in YAML-defined order
+        for dataset_name, dataset_cfg in datasets_map.items():
+            if dataset_name not in experiments_by_dataset:
+                continue  # no experiments for this dataset
 
-            # Build args: base -> dataset -> experiment args
-            exp_args = self._apply_overrides(base_args, {
-                k.replace("-", "_"): v for k, v in dataset_overrides.items()
+            # Build base args for this dataset (no experiment overrides)
+            dataset_args = self._apply_overrides(base_args, {
+                k.replace("-", "_"): v for k, v in (dataset_cfg or {}).items()
             })
-            exp_args = self._apply_overrides(exp_args, {
-                k.replace("-", "_"): v for k, v in exp_overrides.items()
-            })
 
-            # Ensure model is defined via engine overrides, CLI, or exp args
-            if not getattr(exp_args, "model", None):
+            # Ensure model is defined via engine overrides or CLI
+            if not getattr(dataset_args, "model", None):
                 raise ValueError(
                     "Model must be specified via 'engine.model' or CLI --model"
                 )
 
-            print("=" * 50)
-            print(f"Starting experiment: {name} (dataset: {dataset_name})")
-
-            # Reuse the currently loaded dataset requests when the dataset
-            # name matches; otherwise sample anew for the new dataset name.
-            if current_dataset_name != dataset_name or current_requests is None:
-                tokenizer = await engine.get_tokenizer()
-                model_config = await engine.get_model_config()
-                current_requests = apply_openai_to_vllm_format(
-                    get_samples(
-                        exp_args,
-                        cast(PreTrainedTokenizerBase, tokenizer),
-                    ),
-                    model_config,
-                    tokenizer,
-                )
-                current_dataset_name = dataset_name
-
-            # Run the experiment using the single engine and the reused inputs
-            precomputed_requests = current_requests
-            await run_single_experiment(
-                exp_args, engine, metrics_collector, precomputed_requests
+            # Precompute and cache sample requests for this dataset once
+            tokenizer = await engine.get_tokenizer()
+            model_config = await engine.get_model_config()
+            precomputed_requests = apply_openai_to_vllm_format(
+                get_samples(
+                    dataset_args,
+                    cast(PreTrainedTokenizerBase, tokenizer),
+                ),
+                model_config,
+                tokenizer,
             )
+
+            # Run all experiments that use this dataset, reusing requests
+            for idx, exp in enumerate(experiments_by_dataset[dataset_name]):
+                name = exp.get("name", f"exp-{idx}")
+                print("=" * 50)
+                print(f"Starting experiment: {name} (dataset: {dataset_name})")
+
+                # Apply only allowed experiment-level args
+                args_for_run = self._apply_experiment_args(
+                    dataset_args, cast(dict[str, Any], exp.get("args", {}))
+                )
+
+                await run_single_experiment(
+                    args_for_run,
+                    engine,
+                    metrics_collector,
+                    precomputed_requests,
+                )
 
         # Cleanup engine after all experiments finish
         with suppress(Exception):
             engine.shutdown()
-
-        # Free dataset requests
-        current_dataset_name = None
-        current_requests = None
 
         print("All experiments completed.")
 
