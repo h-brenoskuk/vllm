@@ -10,97 +10,93 @@ engine:
   guided-decoding-backend: xgrammar
   enable-prefix-caching: false
 
+datasets:
+  text_random_300x40:
+    dataset-name: random
+    seed: 42
+    num-prompts: 100
+    random-prefix-len: 25
+    random-input-len: 300
+    random-output-len: 40
+    random-range-ratio: 0.2
 
-# TODO: Add dataset args so that we can share 
-# the dataset between two experiments.
+  mm_zero_images:
+    dataset-name: random-mm
+    seed: 42
+    num-prompts: 100
+    random-prefix-len: 25
+    random-input-len: 300
+    random-output-len: 40
+    random-range-ratio: 0.2
+    random-mm-base-items-per-request: 0
+    random-mm-num-mm-items-range-ratio: 0
+    random-mm-limit-mm-per-prompt: '{"image":3,"video":0}'
+    random-mm-bucket-config: '{(256, 256, 1): 0.25, (720, 1280, 1): 0.75}'
+
+  mm_two_images_one_size:
+    dataset-name: random-mm
+    seed: 42
+    num-prompts: 100
+    random-prefix-len: 25
+    random-input-len: 300
+    random-output-len: 40
+    random-range-ratio: 0.2
+    random-mm-base-items-per-request: 2
+    random-mm-num-mm-items-range-ratio: 0
+    random-mm-limit-mm-per-prompt: '{"image":3,"video":0}'
+    random-mm-bucket-config: '{(256, 256, 1): 0.0, (720, 1280, 1): 1.0}'
+
+  mm_two_images_two_sizes:
+    dataset-name: random-mm
+    seed: 42
+    num-prompts: 100
+    random-prefix-len: 25
+    random-input-len: 300
+    random-output-len: 40
+    random-range-ratio: 0.2
+    random-mm-base-items-per-request: 2
+    random-mm-num-mm-items-range-ratio: 0
+    random-mm-limit-mm-per-prompt: '{"image":3,"video":0}'
+    random-mm-bucket-config: '{(256, 256, 1): 0.5, (720, 1280, 1): 0.5}'
+
+  mm_two_sizes_var_items:
+    dataset-name: random-mm
+    seed: 42
+    num-prompts: 100
+    random-prefix-len: 25
+    random-input-len: 300
+    random-output-len: 40
+    random-range-ratio: 0.2
+    random-mm-base-items-per-request: 2
+    random-mm-num-mm-items-range-ratio: 0.5
+    random-mm-limit-mm-per-prompt: '{"image":3,"video":0}'
+    random-mm-bucket-config: '{(256, 256, 1): 0.5, (720, 1280, 1): 0.5}'
 
 experiments:
-  - name: text-only
-    overrides:
-      dataset-name: random
-      num-prompts: 100
+  - name: text-10c
+    dataset: text_random_300x40
+    args:
       max-concurrency: 10
-      random-prefix-len: 25
-      random-input-len: 300
-      random-output-len: 40
-      random-range-ratio: 0.2
       request-rate: inf
       ignore-eos: true
-      endpoint-type: openai-chat
-      endpoint: "/v1/chat/completions"
-      seed: 42
-      
-  - name: random-mm-no-images
-    overrides:
-      num-prompts: 100
-      max-concurrency: 10
-      random-prefix-len: 25
-      random-input-len: 300
-      random-output-len: 40
-      random-range-ratio: 0.2
-      random-mm-base-items-per-request: 0
-      random-mm-num-mm-items-range-ratio: 0
-      random-mm-limit-mm-per-prompt: '{"image":3,"video":0}'
-      random-mm-bucket-config: '{(256, 256, 1): 0.25, (720, 1280, 1): 0.75}'
-      request-rate: inf
-      ignore-eos: true
-      endpoint-type: openai-chat
-      endpoint: "/v1/chat/completions"
-      seed: 42 
 
-  - name: two-images-one-size
-    overrides:
-      dataset-name: random-mm
-      num-prompts: 100
-      max-concurrency: 10
-      random-prefix-len: 25
-      random-input-len: 300
-      random-output-len: 40
-      random-range-ratio: 0.2
-      random-mm-base-items-per-request: 2
-      random-mm-num-mm-items-range-ratio: 0
-      random-mm-limit-mm-per-prompt: '{"image":3,"video":0}'
-      random-mm-bucket-config: '{(256, 256, 1): 0.0, (720, 1280, 1): 1.0}'
+  - name: text-20c
+    dataset: text_random_300x40
+    args:
+      max-concurrency: 20
       request-rate: inf
       ignore-eos: true
-      endpoint-type: openai-chat
-      endpoint: "/v1/chat/completions"
-      seed: 42 
-    
-  - name: two-images-two-sizes
-    overrides:
-      dataset-name: random-mm
-      num-prompts: 100
-      max-concurrency: 10
-      random-prefix-len: 25
-      random-input-len: 300
-      random-output-len: 40
-      random-range-ratio: 0.2
-      random-mm-base-items-per-request: 2
-      random-mm-num-mm-items-range-ratio: 0
-      random-mm-limit-mm-per-prompt: '{"image":3,"video":0}'
-      random-mm-bucket-config: '{(256, 256, 1): 0.5, (720, 1280, 1): 0.5}'
-      request-rate: inf
-      ignore-eos: true
-      endpoint-type: openai-chat
-      endpoint: "/v1/chat/completions"
-      seed: 42 
 
-  - name: random-nb-images-two-sizes
-    overrides:
-      dataset-name: random-mm
-      num-prompts: 100
+  - name: mm-zero-10c
+    dataset: mm_zero_images
+    args:
       max-concurrency: 10
-      random-prefix-len: 25
-      random-input-len: 300
-      random-output-len: 40
-      random-range-ratio: 0.2
-      random-mm-base-items-per-request: 2
-      random-mm-num-mm-items-range-ratio: 0.5
-      random-mm-limit-mm-per-prompt: '{"image":3,"video":0}'
-      random-mm-bucket-config: '{(256, 256, 1): 0.5, (720, 1280, 1): 0.5}'
       request-rate: inf
       ignore-eos: true
-      endpoint-type: openai-chat
-      endpoint: "/v1/chat/completions"
-      seed: 42 
+
+  - name: mm-two-one-size-10c
+    dataset: mm_two_images_one_size
+    args:
+      max-concurrency: 10
+      request-rate: inf
+      ignore-eos: true

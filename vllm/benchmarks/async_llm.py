@@ -683,6 +683,7 @@ async def run_single_experiment(
     args: argparse.Namespace,
     engine: AsyncLLM | None = None,
     metrics_collector: BenchmarkMetricsCollector | None = None,
+    precomputed_requests: list[SampleRequest] | None = None,
 ) -> tuple[AsyncLLM, BenchmarkMetricsCollector]:
     """Run one experiment, optionally reusing an existing engine.
 
@@ -718,12 +719,15 @@ async def run_single_experiment(
     tokenizer = await engine.get_tokenizer()
     model_config = await engine.get_model_config()
 
-    # Build input requests converting requests to vLLM format
-    input_requests = apply_openai_to_vllm_format(
-        get_samples(args, cast(PreTrainedTokenizerBase, tokenizer)),
-        model_config,
-        tokenizer,
-    )
+    # Build or reuse input requests; convert to vLLM format if needed
+    if precomputed_requests is not None:
+        input_requests: list[SampleRequest] = precomputed_requests
+    else:
+        input_requests = apply_openai_to_vllm_format(
+            get_samples(args, cast(PreTrainedTokenizerBase, tokenizer)),
+            model_config,
+            tokenizer,
+        )
 
     total_requests = len(input_requests)
     print(f"Traffic request rate: {args.request_rate}")
@@ -842,51 +846,62 @@ class BenchmarkManager:
     """Run multiple experiments sequentially with engine reuse.
 
     YAML schema (example):
+      engine:
+        model: Qwen/Qwen2.5-VL-3B-Instruct
+        tensor-parallel-size: 1
+        pipeline-parallel-size: 1
+        dtype: bfloat16
+        gpu-memory-utilization: 0.9
+        max-model-len: 16384
+        limit-mm-per-prompt: "image=3,video=0"
+        mm-processor-kwargs: "max_pixels=1003520"
+        guided-decoding-backend: xgrammar
+        enable-prefix-caching: false
+
+      datasets:
+        text_random_300x40:
+          dataset-name: random
+          seed: 42
+          num-prompts: 100
+          random-prefix-len: 25
+          random-input-len: 300
+          random-output-len: 40
+          random-range-ratio: 0.2
+
+        mm_zero_images:
+          dataset-name: random-mm
+          seed: 42
+          num-prompts: 100
+          random-prefix-len: 25
+          random-input-len: 300
+          random-output-len: 40
+          random-range-ratio: 0.2
+          random-mm-base-items-per-request: 0
+          random-mm-num-mm-items-range-ratio: 0
+          random-mm-limit-mm-per-prompt: '{"image":3,"video":0}'
+          random-mm-bucket-config: '{(256, 256, 1): 0.25, (720, 1280, 1): 0.75}'
+
       experiments:
-        - name: run1
-          overrides:
-            model: meta-llama/Llama-3-8B-Instruct
-            dataset_name: random
-            num_prompts: 100
-            request_rate: 10
-            max_concurrency: 16
-            top_p: 0.9
-        - name: run2
-          overrides:
-            request_rate: 20
-            temperature: 0.0
+        - name: text-10c
+          dataset: text_random_300x40
+          args:
+            max-concurrency: 10
+            request-rate: inf
+            ignore-eos: true
+
+        - name: mm-zero-10c
+          dataset: mm_zero_images
+          args:
+            max-concurrency: 10
+            request-rate: inf
+            ignore-eos: true
     """
 
     def __init__(self) -> None:
-        # Maintain a single active engine to prevent GPU memory blowup
-        self._active_key: str | None = None
-        self._active_engine: (
-            tuple[AsyncLLM, BenchmarkMetricsCollector] | None
-        ) = (None)
+        # Engine is created in run_from_yaml (async context)
+        pass
 
-    def _engine_key_from_args(self, args: argparse.Namespace) -> str:
-        # Keys that affect engine instantiation
-        engine_keys = [
-            "model",
-            "pipeline_parallel_size",
-            "tensor_parallel_size",
-            "dtype",
-            "gpu_memory_utilization",
-            "mm_processor_kwargs",
-            "guided_decoding_backend",
-            "limit_mm_per_prompt",
-            "max_model_len",
-            "enable_prefix_caching",
-        ]
-        engine_cfg = {k: getattr(args, k, None) for k in engine_keys}
-        # Normalize embedded dict-like strings into dicts
-        engine_cfg["mm_processor_kwargs"] = _normalize_kv_input(
-            getattr(args, "mm_processor_kwargs", None)
-        )
-        engine_cfg["limit_mm_per_prompt"] = _normalize_kv_input(
-            getattr(args, "limit_mm_per_prompt", None)
-        )
-        return json.dumps(engine_cfg, sort_keys=True)
+    
 
     def _apply_overrides(self, base_args: argparse.Namespace,
                          overrides: dict[str, Any]) -> argparse.Namespace:
@@ -900,19 +915,23 @@ class BenchmarkManager:
             setattr(new_args, attr, coerced)
         return new_args
 
+
     async def run_from_yaml(self, base_args: argparse.Namespace) -> None:
         assert base_args.config_yaml is not None
         with open(base_args.config_yaml, encoding="utf-8") as f:
             cfg = yaml.safe_load(f)
-        if isinstance(cfg, dict):
-            engine_overrides = cfg.get("engine", {}) or {}
-            experiments = cfg.get("experiments", [])
-        else:
-            engine_overrides = {}
-            experiments = cfg
+        if not isinstance(cfg, dict):
+            raise ValueError("YAML must be a mapping with 'experiments' list")
+
+        engine_overrides = cfg.get("engine", {}) or {}
+        experiments = cfg.get("experiments", [])
+        datasets_map = cfg.get("datasets", {}) or {}
+
         if not isinstance(experiments, list):
-            raise ValueError(
-                "YAML must define an 'experiments' list or be a list")
+            raise ValueError("'experiments' must be a list")
+        if not isinstance(datasets_map, dict):
+            raise ValueError("'datasets' must be a mapping of name -> config")
+
         # Apply top-level engine overrides once (single engine across runs)
         if engine_overrides:
             normalized_engine_overrides = {
@@ -922,73 +941,92 @@ class BenchmarkManager:
             base_args = self._apply_overrides(
                 base_args, normalized_engine_overrides)
 
+        # Create a single engine for all experiments
+        engine_args_dict = {
+            "model": base_args.model,
+            "pipeline_parallel_size": base_args.pipeline_parallel_size,
+            "tensor_parallel_size": base_args.tensor_parallel_size,
+            "dtype": base_args.dtype,
+            "gpu_memory_utilization": base_args.gpu_memory_utilization,
+            "mm_processor_kwargs": _normalize_kv_input(
+                base_args.mm_processor_kwargs),
+            "guided_decoding_backend": base_args.guided_decoding_backend,
+            "limit_mm_per_prompt": _normalize_kv_input(
+                base_args.limit_mm_per_prompt),
+            "max_model_len": base_args.max_model_len,
+            "disable_log_requests": True,
+            "enable_prefix_caching": bool(base_args.enable_prefix_caching),
+        }
+        engine, metrics_collector = await create_async_llm_engine_with_metrics(
+            engine_args_dict
+        )
+
+        # Track the currently loaded dataset by name and its sampled requests
+        current_dataset_name: str | None = None
+        current_requests: list[SampleRequest] | None = None
+
         for idx, exp in enumerate(experiments):
-            name = (
-                exp.get("name", f"exp-{idx}")
-                if isinstance(exp, dict) else f"exp-{idx}"
-            )
-            overrides = (
-                exp.get("overrides", {}) if isinstance(exp, dict) else {}
-            )
-            # Ensure a model is defined either at top-level engine config or
-            # per-experiment overrides.
-            model_in_engine = engine_overrides.get("model") if isinstance(
-                engine_overrides, dict) else None
-            model_in_exp = overrides.get("model") if isinstance(
-                overrides, dict) else None
-            if model_in_engine is None and model_in_exp is None and not getattr(
-                    base_args, "model", None):
+            if not isinstance(exp, dict):
+                raise ValueError("Each experiment entry must be a mapping")
+
+            name = exp.get("name", f"exp-{idx}")
+            dataset_name = exp.get("dataset")
+            if not dataset_name:
                 raise ValueError(
-                    "Model must be specified for YAML runs via either a top-"
-                    "level 'engine.model', a per-experiment 'model' override,"
-                    " or the CLI '--model'."
+                    f"Experiment '{name}' missing required 'dataset' key")
+            if dataset_name not in datasets_map:
+                raise ValueError(
+                    f"Experiment '{name}' references unknown dataset "
+                    f"'{dataset_name}'")
+
+            dataset_overrides = datasets_map.get(dataset_name, {}) or {}
+            exp_overrides = exp.get("args", {}) or {}
+
+            # Build args: base -> dataset -> experiment args
+            exp_args = self._apply_overrides(base_args, {
+                k.replace("-", "_"): v for k, v in dataset_overrides.items()
+            })
+            exp_args = self._apply_overrides(exp_args, {
+                k.replace("-", "_"): v for k, v in exp_overrides.items()
+            })
+
+            # Ensure model is defined via engine overrides, CLI, or exp args
+            if not getattr(exp_args, "model", None):
+                raise ValueError(
+                    "Model must be specified via 'engine.model' or CLI --model"
                 )
-            # When top-level engine exists, prevent per-experiment engine
-            # overrides
-            if engine_overrides:
-                engine_keys = {
-                    "model", "pipeline_parallel_size", "tensor_parallel_size",
-                    "dtype", "gpu_memory_utilization", "mm_processor_kwargs",
-                    "guided_decoding_backend", "limit_mm_per_prompt",
-                    "max_model_len", "enable_prefix_caching",
-                }
-                disallowed = [
-                    k for k in overrides
-                    if k.replace("-", "_") in engine_keys
-                ]
-                if disallowed:
-                    raise ValueError(
-                        "Per-experiment overrides must not include engine "
-                        "keys when a top-level 'engine' section is used. "
-                        "Remove: " + ", ".join(disallowed)
-                    )
+
             print("=" * 50)
-            print(f"Starting experiment: {name}")
-            exp_args = self._apply_overrides(base_args, overrides)
+            print(f"Starting experiment: {name} (dataset: {dataset_name})")
 
-            engine_key = self._engine_key_from_args(exp_args)
-            # Reuse engine if key matches; otherwise shutdown and create new
-            if self._active_engine is None or self._active_key != engine_key:
-                # Shutdown previous engine if exists
-                if self._active_engine is not None:
-                    with suppress(Exception):
-                        self._active_engine[0].shutdown()
-                engine, metrics_collector = await run_single_experiment(
-                    exp_args)
-                self._active_engine = (engine, metrics_collector)
-                self._active_key = engine_key
-            else:
-                engine, metrics_collector = self._active_engine
-                await run_single_experiment(
-                    exp_args, engine, metrics_collector
+            # Reuse the currently loaded dataset requests when the dataset
+            # name matches; otherwise sample anew for the new dataset name.
+            if current_dataset_name != dataset_name or current_requests is None:
+                tokenizer = await engine.get_tokenizer()
+                model_config = await engine.get_model_config()
+                current_requests = apply_openai_to_vllm_format(
+                    get_samples(
+                        exp_args,
+                        cast(PreTrainedTokenizerBase, tokenizer),
+                    ),
+                    model_config,
+                    tokenizer,
                 )
+                current_dataset_name = dataset_name
 
-        # Cleanup active engine after all experiments finish
-        if self._active_engine is not None:
-            with suppress(Exception):
-                self._active_engine[0].shutdown()
-            self._active_engine = None
-            self._active_key = None
+            # Run the experiment using the single engine and the reused inputs
+            precomputed_requests = current_requests
+            await run_single_experiment(
+                exp_args, engine, metrics_collector, precomputed_requests
+            )
+
+        # Cleanup engine after all experiments finish
+        with suppress(Exception):
+            engine.shutdown()
+
+        # Free dataset requests
+        current_dataset_name = None
+        current_requests = None
 
         print("All experiments completed.")
 
