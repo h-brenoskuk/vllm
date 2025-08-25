@@ -676,159 +676,7 @@ async def get_request(
         await asyncio.sleep(interval)
 
 
-async def main_async(args: argparse.Namespace) -> None:
-    # Enforce that a model is provided in single-run mode.
-    if (not getattr(args, "config_yaml", None)
-            and not getattr(args, "model", None)):
-        raise SystemExit(
-            "Missing --model. Provide --model for single-run CLI or use "
-            "--config-yaml with an 'engine.model' or per-experiment 'model' "
-            "override."
-        )
-    # If a YAML config is provided, use the BenchmarkManager path
-    if getattr(args, "config_yaml", None):
-        if yaml is None:
-            raise RuntimeError(
-                "PyYAML is required for --config-yaml but not installed. "
-                "Install pyyaml or remove --config-yaml."
-            )
-        manager = BenchmarkManager()
-        await manager.run_from_yaml(args)
-        return
-    # Build engine args from CLI/YAML (normalize both string and dict)
-    limit_mm_dict = _normalize_kv_input(args.limit_mm_per_prompt)
-    mm_kwargs_dict = _normalize_kv_input(args.mm_processor_kwargs)
 
-    vllm_args: dict[str, Any] = {
-        "model": args.model,
-        "pipeline_parallel_size": args.pipeline_parallel_size,
-        "tensor_parallel_size": args.tensor_parallel_size,
-        "dtype": args.dtype,
-        "gpu_memory_utilization": args.gpu_memory_utilization,
-        "mm_processor_kwargs": mm_kwargs_dict,
-        "guided_decoding_backend": args.guided_decoding_backend,
-        "limit_mm_per_prompt": limit_mm_dict,
-        "max_model_len": args.max_model_len,
-        "enable_prefix_caching": bool(args.enable_prefix_caching),
-    }
-
-    async_vllm_args = {**vllm_args, "disable_log_requests": True}
-
-    # Create engine with metrics collection
-    engine, metrics_collector = await create_async_llm_engine_with_metrics(
-        async_vllm_args
-    )
-
-    # Tokenizer and (optional) model config for multimodal conversion
-    tokenizer = await engine.get_tokenizer()
-    model_config = await engine.get_model_config()
-
-    # Build input requests converting requests to vLLM format
-    input_requests = apply_openai_to_vllm_format(
-        get_samples(args, cast(PreTrainedTokenizerBase, tokenizer)),
-        model_config,
-        tokenizer,
-    )
-
-    total_requests = len(input_requests)
-    print(f"Traffic request rate: {args.request_rate}")
-    print(f"Maximum request concurrency: {args.max_concurrency}")
-
-    # Concurrency limiter
-    semaphore = (asyncio.Semaphore(args.max_concurrency)
-                 if args.max_concurrency else None)
-
-    # request calls the async engine generate method
-    async def request_func(
-        request_func_input: SampleRequest,
-        pbar: tqdm | None,
-    ):
-        try:
-            # Create sampling parameters with the expected output length
-            sp_kwargs: dict[str, Any] = {
-                "max_tokens": request_func_input.expected_output_len,
-                "temperature": args.temperature,
-                "ignore_eos": args.ignore_eos,
-            }
-            if args.top_p is not None:
-                sp_kwargs["top_p"] = args.top_p
-            if args.top_k is not None:
-                sp_kwargs["top_k"] = args.top_k
-            if args.min_p is not None:
-                sp_kwargs["min_p"] = args.min_p
-            sampling_params = SamplingParams(**sp_kwargs)
-
-            # Generate using the async engine
-            outputs = []
-            async for output in engine.generate(
-                prompt=request_func_input.prompt,
-                sampling_params=sampling_params,
-                request_id=random_uuid(),
-            ):
-                outputs.append(output)
-
-            # Update progress bar
-            if pbar is not None:
-                pbar.update(1)
-
-            # Return the final output (complete generation)
-            return outputs[-1] if outputs else None
-
-        except Exception as e:
-            if pbar is not None:
-                pbar.update(1)
-            print(f"Exception occurred: {type(e).__name__}: {str(e)}")
-            import traceback
-
-            traceback.print_exc()
-            return f"Error: {str(e)}"
-
-    # Readiness/warmup run using the first request (mirrors serve.py behavior)
-    if total_requests > 0:
-        # This mirrors the behavior of serve.py
-        print("Starting initial single prompt test run...")
-        first_req = input_requests[0]
-        await request_func(request_func_input=first_req, pbar=None)
-        print("Initial test run completed. Starting main benchmark run...")
-
-    # Create progress bar for measured run over full dataset (including first)
-    pbar = None if args.disable_tqdm else tqdm(total=total_requests)
-    async def limited_request_func(request_func_input, pbar):
-        if semaphore is None:
-            return await request_func(
-                request_func_input=request_func_input, pbar=pbar
-            )
-        async with semaphore:
-            return await request_func(
-                request_func_input=request_func_input, pbar=pbar
-            )
-
-    # Start metrics collection
-    metrics_collector.start_benchmark()
-
-    benchmark_start_time = time.perf_counter()
-    tasks: list[asyncio.Task] = []
-    async for request in get_request(input_requests, args.request_rate):
-        tasks.append(
-            asyncio.create_task(
-                limited_request_func(request_func_input=request, pbar=pbar)
-            )
-        )
-
-    await asyncio.gather(*tasks)
-    elapsed_time = time.perf_counter() - benchmark_start_time
-
-    # End metrics collection
-    metrics_collector.end_benchmark()
-
-    print(f"Benchmark completed in {elapsed_time:.2f} seconds")
-
-    if pbar is not None:
-        pbar.close()
-
-    # Print detailed metrics
-    print()  # Add some space
-    metrics_collector.print_metrics()
 
 
 async def run_single_experiment(
@@ -1202,7 +1050,28 @@ python3 benchmarks/async_llm.py --config-yaml \
     benchmarks/config.yaml
 """
 
-
+async def main_async(args: argparse.Namespace) -> None:
+    # Enforce that a model is provided in single-run mode.
+    if (not getattr(args, "config_yaml", None)
+            and not getattr(args, "model", None)):
+        raise SystemExit(
+            "Missing --model. Provide --model for single-run CLI or use "
+            "--config-yaml with an 'engine.model' or per-experiment 'model' "
+            "override."
+        )
+    # If a YAML config is provided, use the BenchmarkManager path
+    if getattr(args, "config_yaml", None):
+        if yaml is None:
+            raise RuntimeError(
+                "PyYAML is required for --config-yaml but not installed. "
+                "Install pyyaml or remove --config-yaml."
+            )
+        manager = BenchmarkManager()
+        await manager.run_from_yaml(args)
+        return
+    # Single-run path: delegate to unified runner
+    await run_single_experiment(args)
+    return
 
 
 if __name__ == "__main__":
