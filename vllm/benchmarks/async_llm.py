@@ -1069,8 +1069,10 @@ async def main_async(args: argparse.Namespace) -> None:
         manager = BenchmarkManager()
         await manager.run_from_yaml(args)
         return
-    # Single-run path: delegate to unified runner
-    await run_single_experiment(args)
+    # Single-run path: delegate to unified runner and shutdown engine
+    engine, _metrics = await run_single_experiment(args)
+    with suppress(Exception):
+        engine.shutdown()
     return
 
 
