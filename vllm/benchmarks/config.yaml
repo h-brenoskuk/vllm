@@ -15,21 +15,7 @@ engine:
 # the dataset between two experiments.
 
 experiments:
-  - name: random-99
-    overrides:
-      dataset-name: random
-      num-prompts: 99
-      max-concurrency: 10
-      random-prefix-len: 25
-      random-input-len: 300
-      random-output-len: 40
-      random-range-ratio: 0.2
-      request-rate: inf
-      ignore-eos: true
-      endpoint-type: openai-chat
-      seed: 43
-      
-  - name: random-100
+  - name: text-only
     overrides:
       dataset-name: random
       num-prompts: 100
@@ -41,9 +27,47 @@ experiments:
       request-rate: inf
       ignore-eos: true
       endpoint-type: openai-chat
+      endpoint: "/v1/chat/completions"
       seed: 42
+      
+  - name: random-mm-no-images
+    overrides:
+      num-prompts: 100
+      max-concurrency: 10
+      random-prefix-len: 25
+      random-input-len: 300
+      random-output-len: 40
+      random-range-ratio: 0.2
+      random-mm-base-items-per-request: 0
+      random-mm-num-mm-items-range-ratio: 0
+      random-mm-limit-mm-per-prompt: '{"image":3,"video":0}'
+      random-mm-bucket-config: '{(256, 256, 1): 0.25, (720, 1280, 1): 0.75}'
+      request-rate: inf
+      ignore-eos: true
+      endpoint-type: openai-chat
+      endpoint: "/v1/chat/completions"
+      seed: 42 
 
-  - name: random-mm-100
+  - name: two-images-one-size
+    overrides:
+      dataset-name: random-mm
+      num-prompts: 100
+      max-concurrency: 10
+      random-prefix-len: 25
+      random-input-len: 300
+      random-output-len: 40
+      random-range-ratio: 0.2
+      random-mm-base-items-per-request: 2
+      random-mm-num-mm-items-range-ratio: 0
+      random-mm-limit-mm-per-prompt: '{"image":3,"video":0}'
+      random-mm-bucket-config: '{(256, 256, 1): 0.0, (720, 1280, 1): 1.0}'
+      request-rate: inf
+      ignore-eos: true
+      endpoint-type: openai-chat
+      endpoint: "/v1/chat/completions"
+      seed: 42 
+    
+  - name: two-images-two-sizes
     overrides:
       dataset-name: random-mm
       num-prompts: 100
@@ -59,4 +83,24 @@ experiments:
       request-rate: inf
       ignore-eos: true
       endpoint-type: openai-chat
-      seed: 42
+      endpoint: "/v1/chat/completions"
+      seed: 42 
+
+  - name: random-nb-images-two-sizes
+    overrides:
+      dataset-name: random-mm
+      num-prompts: 100
+      max-concurrency: 10
+      random-prefix-len: 25
+      random-input-len: 300
+      random-output-len: 40
+      random-range-ratio: 0.2
+      random-mm-base-items-per-request: 2
+      random-mm-num-mm-items-range-ratio: 0.5
+      random-mm-limit-mm-per-prompt: '{"image":3,"video":0}'
+      random-mm-bucket-config: '{(256, 256, 1): 0.5, (720, 1280, 1): 0.5}'
+      request-rate: inf
+      ignore-eos: true
+      endpoint-type: openai-chat
+      endpoint: "/v1/chat/completions"
+      seed: 42 
