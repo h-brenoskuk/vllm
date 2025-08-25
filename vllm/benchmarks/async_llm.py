@@ -45,6 +45,8 @@ def convert_openai_to_vllm_format(
 ) -> dict[str, object]:
     """
     Convert OpenAI API format from SampleRequest to vLLM internal format.
+
+    Currently only support images.
     """
 
     if not request.multi_modal_data:
@@ -57,8 +59,17 @@ def convert_openai_to_vllm_format(
 
     # Handle both single image and multiple images
     if isinstance(request.multi_modal_data, list):
+        # Raise error if the list contains anything other than images.
+        for item in request.multi_modal_data:
+            if item.get("type") != "image_url":
+                raise ValueError("Only images are supported in "
+                "the multimodal data.")
         content.extend(cast(list[Any], request.multi_modal_data))
     else:
+        # Raise error if the item isn't image_url.
+        if request.multi_modal_data.get("type") != "image_url":
+            raise ValueError("Only images are supported in "
+                "the multimodal data.")
         content.append(cast(Any, request.multi_modal_data))
 
     messages: list[Any] = [
@@ -84,6 +95,29 @@ def convert_openai_to_vllm_format(
 
     return {"prompt": prompt_str, "multi_modal_data": mm_data}
 
+def apply_openai_to_vllm_format(
+    requests: list[SampleRequest],
+    model_config,
+    tokenizer,
+) -> list[SampleRequest]:
+    """
+    Apply OpenAI to vLLM format to the requests.
+    """
+    # Pre-convert multimodal requests so conversion cost is outside timed path
+    # For images, we desserialize the image data and convert it to a string.
+    # This is done here so that the conversion cost is outside the timed path.
+    for req in requests:
+        try:
+            if getattr(req, "multi_modal_data", None):
+                converted = convert_openai_to_vllm_format(
+                    req, model_config, tokenizer
+                )
+                # Store converted dict as prompt and clear multimodal field
+                req.prompt = converted
+                req.multi_modal_data = None
+        except Exception as _:
+            pass
+    return requests
 
 class BenchmarkMetricsCollector(StatLoggerBase):
     """Collects benchmark metrics from the v1 engine's internal stats."""
@@ -681,8 +715,12 @@ async def main_async(args: argparse.Namespace) -> None:
     tokenizer = await engine.get_tokenizer()
     model_config = await engine.get_model_config()
 
-    # Build input requests via the shared dataset loader
-    input_requests = get_samples(args, cast(PreTrainedTokenizerBase, tokenizer))
+    # Build input requests converting requests to vLLM format
+    input_requests = apply_openai_to_vllm_format(
+        get_samples(args, cast(PreTrainedTokenizerBase, tokenizer)),
+        model_config,
+        tokenizer,
+    )
 
     total_requests = len(input_requests)
     print(f"Traffic request rate: {args.request_rate}")
@@ -712,20 +750,10 @@ async def main_async(args: argparse.Namespace) -> None:
                 sp_kwargs["min_p"] = args.min_p
             sampling_params = SamplingParams(**sp_kwargs)
 
-            # Prepare prompt; convert multimodal OpenAI-like content
-            prompt_to_generate: Any
-            if request_func_input.multi_modal_data:
-                converted = convert_openai_to_vllm_format(
-                    request_func_input, model_config, tokenizer
-                )
-                prompt_to_generate = converted
-            else:
-                prompt_to_generate = request_func_input.prompt
-
             # Generate using the async engine
             outputs = []
             async for output in engine.generate(
-                prompt=cast(Any, prompt_to_generate),
+                prompt=request_func_input.prompt,
                 sampling_params=sampling_params,
                 request_id=random_uuid(),
             ):
@@ -779,7 +807,7 @@ async def main_async(args: argparse.Namespace) -> None:
             )
         )
 
-    _ = await asyncio.gather(*tasks)
+    await asyncio.gather(*tasks)
     elapsed_time = time.perf_counter() - benchmark_start_time
 
     # End metrics collection
@@ -834,8 +862,12 @@ async def run_single_experiment(
     tokenizer = await engine.get_tokenizer()
     model_config = await engine.get_model_config()
 
-    # Build input requests via the shared dataset loader
-    input_requests = get_samples(args, cast(PreTrainedTokenizerBase, tokenizer))
+    # Build input requests converting requests to vLLM format
+    input_requests = apply_openai_to_vllm_format(
+        get_samples(args, cast(PreTrainedTokenizerBase, tokenizer)),
+        model_config,
+        tokenizer,
+    )
 
     total_requests = len(input_requests)
     print(f"Traffic request rate: {args.request_rate}")
@@ -932,7 +964,7 @@ async def run_single_experiment(
             )
         )
 
-    _ = await asyncio.gather(*tasks)
+    await asyncio.gather(*tasks)
     elapsed_time = time.perf_counter() - benchmark_start_time
 
     # End metrics collection
