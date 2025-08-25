@@ -69,6 +69,8 @@ experiments:
 
 import argparse
 import asyncio
+import json
+from contextlib import suppress
 from copy import deepcopy
 from typing import Any, cast
 
@@ -86,26 +88,147 @@ from vllm.benchmarks.serve import check_goodput_args
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 
-def _coerce_override_value(key: str, value: Any) -> Any:
-    """Coerce YAML override values to expected types.
+def _parse_kv_dict(
+    arg_val: str | None,
+    value_parser=None,
+) -> dict[str, Any] | None:
+    """Parse simple comma-separated k=v pairs into a dict.
 
-    Aligns with common fields we expose for OpenAI benchmarking.
+    Example: "image=3,video=0" -> {"image": 3, "video": 0}
+    """
+    if arg_val is None:
+        return None
+    result: dict[str, Any] = {}
+    for pair in arg_val.split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+        if "=" not in pair:
+            raise ValueError(f"Invalid k=v pair: {pair}")
+        k, v = pair.split("=", 1)
+        k = k.strip()
+        v = v.strip()
+        if value_parser is not None:
+            result[k] = value_parser(v)
+        else:
+            # Try int -> float -> str
+            try:
+                result[k] = int(v)
+            except ValueError:
+                try:
+                    result[k] = float(v)
+                except ValueError:
+                    # Support true/false
+                    if v.lower() in ("true", "false"):
+                        result[k] = v.lower() == "true"
+                    else:
+                        result[k] = v
+    return result
+
+
+def _normalize_kv_input(val: Any) -> dict[str, Any]:
+    """Normalize CLI/YAML kv inputs into dictionaries.
+
+    Accepts either a dict (returned as-is), a JSON/k=v string, or None.
+    """
+    if val is None:
+        return {}
+    if isinstance(val, dict):
+        return val
+    if isinstance(val, str):
+        s = val.strip()
+        # Try JSON first
+        if s.startswith("{") and s.endswith("}"):
+            try:
+                return cast(dict[str, Any], json.loads(s))
+            except Exception:
+                pass
+        # Fallback to simple k=v parsing
+        try:
+            return _parse_kv_dict(s) or {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _parse_mm_bucket_config_value(v: Any) -> dict[tuple[int, int, int], float]:
+    """Parse random-mm bucket config from YAML overrides.
+
+    Supports dict with tuple or string keys, or a string that can be
+    ast.literal_eval'ed into a dict.
+    """
+    import ast as _ast  # local import to avoid global namespace clutter
+
+    def _normalize(d: dict) -> dict[tuple[int, int, int], float]:
+        out: dict[tuple[int, int, int], float] = {}
+        for k, val in d.items():
+            key: Any = k
+            if isinstance(key, str):
+                with suppress(Exception):
+                    key = _ast.literal_eval(key)
+            if not (
+                isinstance(key, tuple) and len(key) == 3 and
+                all(isinstance(x, int) for x in key)
+            ):
+                raise ValueError(
+                    f"Invalid bucket key {k!r}. Expected tuple (H, W, T)."
+                )
+            out[(int(key[0]), int(key[1]), int(key[2]))] = float(val)
+        return out
+
+    if isinstance(v, dict):
+        return _normalize(v)
+    if isinstance(v, str):
+        with suppress(Exception):
+            parsed = _ast.literal_eval(v)
+            if isinstance(parsed, dict):
+                return _normalize(parsed)
+        raise ValueError(
+            "Unsupported value for random_mm_bucket_config override."
+        )
+    raise ValueError(
+        "random_mm_bucket_config override must be dict or string."
+    )
+
+
+def _coerce_override_value(key: str, value: Any) -> Any:
+    """Coerce YAML override values to expected CLI types.
+
+    Mirrors async_llm.py so dataset overrides behave identically.
     """
     float_keys = {
         "request_rate",
         "top_p",
         "min_p",
         "temperature",
+        "gpu_memory_utilization",
         "burstiness",
     }
     int_keys = {
         "max_concurrency",
+        "tensor_parallel_size",
+        "pipeline_parallel_size",
+        "max_model_len",
         "top_k",
         "num_prompts",
         "logprobs",
         "ready_check_timeout_sec",
     }
-    bool_keys = {"ignore_eos", "disable_tqdm", "trust_remote_code"}
+    bool_keys = {"ignore_eos", "enable_prefix_caching", "disable_tqdm",
+                 "trust_remote_code"}
+
+    # Dataset-related numeric fields
+    float_keys.update({
+        "random_mm_num_mm_items_range_ratio",
+        "random_range_ratio",
+    })
+    int_keys.update({
+        "random_mm_base_items_per_request",
+        "random_prefix_len",
+        "random_input_len",
+        "random_output_len",
+        "num_prompts",
+    })
 
     if key in float_keys:
         if isinstance(value, str):
@@ -133,6 +256,32 @@ def _coerce_override_value(key: str, value: Any) -> Any:
         if isinstance(value, str):
             return value.strip().lower() == "true"
         return bool(value)
+
+    # Dict-like overrides that may arrive as JSON or k=v strings
+    if key in {"mm_processor_kwargs", "limit_mm_per_prompt"}:
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            return _normalize_kv_input(value)
+        return value
+
+    # Multimodal dataset dict overrides
+    if key == "random_mm_limit_mm_per_prompt":
+        if isinstance(value, dict):
+            return {str(k): int(v) for k, v in value.items()}
+        if isinstance(value, str):
+            try:
+                d = cast(dict[str, Any], json.loads(value))
+            except Exception:
+                d = _normalize_kv_input(value)
+            return {str(k): int(v) for k, v in d.items()}
+        return value
+
+    if key == "random_mm_bucket_config":
+        try:
+            return _parse_mm_bucket_config_value(value)
+        except Exception:
+            return value
 
     return value
 
