@@ -1,0 +1,119 @@
+api:
+  endpoint-type: openai-chat
+  backend: openai
+  base-url: http://127.0.0.1:8000
+  endpoint: /v1/chat/completions
+  model: Qwen/Qwen2.5-VL-3B-Instruct
+  tokenizer-mode: auto
+  trust-remote-code: false
+  logprobs: null
+
+engine:
+  model: Qwen/Qwen2.5-VL-3B-Instruct
+  tensor-parallel-size: 1
+  pipeline-parallel-size: 1
+  dtype: bfloat16
+  gpu-memory-utilization: 0.9
+  max-model-len: 16384
+  limit-mm-per-prompt: "image=3,video=0"
+  mm-processor-kwargs: "max_pixels=1003520"
+  guided-decoding-backend: xgrammar
+  enable-prefix-caching: false
+
+datasets:
+  text_only:
+    dataset-name: random
+    seed: 42
+    num-prompts: 100
+    random-prefix-len: 25
+    random-input-len: 300
+    random-output-len: 40
+    random-range-ratio: 0.2
+
+  mm_text_only:
+    dataset-name: random-mm
+    seed: 42
+    num-prompts: 100
+    random-prefix-len: 25
+    random-input-len: 300
+    random-output-len: 40
+    random-range-ratio: 0.2
+    random-mm-base-items-per-request: 0
+    random-mm-num-mm-items-range-ratio: 0
+    random-mm-limit-mm-per-prompt: '{"image":3,"video":0}'
+    random-mm-bucket-config: '{(256, 256, 1): 0.25, (720, 1280, 1): 0.75}'
+
+  mm_two_images_one_size:
+    dataset-name: random-mm
+    seed: 42
+    num-prompts: 100
+    random-prefix-len: 25
+    random-input-len: 300
+    random-output-len: 40
+    random-range-ratio: 0.2
+    random-mm-base-items-per-request: 2
+    random-mm-num-mm-items-range-ratio: 0
+    random-mm-limit-mm-per-prompt: '{"image":3,"video":0}'
+    random-mm-bucket-config: '{(256, 256, 1): 0.0, (720, 1280, 1): 1.0}'
+
+  mm_two_images_two_sizes:
+    dataset-name: random-mm
+    seed: 42
+    num-prompts: 100
+    random-prefix-len: 25
+    random-input-len: 300
+    random-output-len: 40
+    random-range-ratio: 0.2
+    random-mm-base-items-per-request: 2
+    random-mm-num-mm-items-range-ratio: 0
+    random-mm-limit-mm-per-prompt: '{"image":3,"video":0}'
+    random-mm-bucket-config: '{(256, 256, 1): 0.5, (720, 1280, 1): 0.5}'
+
+  mm_var_images_two_sizes:
+    dataset-name: random-mm
+    seed: 42
+    num-prompts: 100
+    random-prefix-len: 25
+    random-input-len: 300
+    random-output-len: 40
+    random-range-ratio: 0.2
+    random-mm-base-items-per-request: 2
+    random-mm-num-mm-items-range-ratio: 0.5
+    random-mm-limit-mm-per-prompt: '{"image":3,"video":0}'
+    random-mm-bucket-config: '{(256, 256, 1): 0.5, (720, 1280, 1): 0.5}'
+
+experiments:
+  - name: text-baseline
+    dataset: text_only
+    args:
+      max-concurrency: 10
+      request-rate: inf
+      ignore-eos: true
+
+  - name: mm-text-sanity-check
+    dataset: mm_text_only
+    args:
+      max-concurrency: 10
+      request-rate: inf
+      ignore-eos: true
+
+  - name: sanity
+    dataset: mm_two_images_one_size
+    args:
+      max-concurrency: 10
+      request-rate: inf
+      ignore-eos: true
+
+  - name: two_images_two_sizes-10c
+    dataset: mm_two_images_two_sizes
+    args:
+      max-concurrency: 10
+      request-rate: inf
+      ignore-eos: true
+
+  - name: mm-var-images-two-sizes-10c
+    dataset: mm_var_images_two_sizes
+    args:
+      max-concurrency: 10
+      request-rate: inf
+      ignore-eos: true

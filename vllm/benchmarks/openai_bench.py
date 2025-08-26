@@ -1,71 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-SPDX-License-Identifier: Apache-2.0
-SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-OpenAI-compatible multi-experiment benchmark runner.
-
-This mirrors the multi-run/manager flow of async_llm.py but drives
-the client-side benchmark defined in serve.py against an OpenAI-
-compatible endpoint.
-
-YAML schema example:
-
-api:
-  endpoint-type: openai-chat       # or "openai"
-  backend: openai                  # must be an OPENAI_COMPATIBLE_BACKEND
-  base-url: https://api.openai.com # or your gateway
-  endpoint: /v1/chat/completions   # or /v1/completions
-  model: gpt-4o-mini               # model id in request body
-  served-model-name: gpt-4o-mini   # optional; display/name override
-  tokenizer: gpt2                  # optional, for client-side metrics only
-  tokenizer-mode: auto             # optional
-  trust-remote-code: false         # optional
-  logprobs: null                   # optional, e.g. 1
-
-datasets:
-  text_random_300x40:
-    dataset-name: random
-    seed: 42
-    num-prompts: 100
-    random-prefix-len: 25
-    random-input-len: 300
-    random-output-len: 40
-    random-range-ratio: 0.2
-
-  mm_two_images_two_sizes:
-    dataset-name: random-mm
-    seed: 42
-    num-prompts: 100
-    random-prefix-len: 25
-    random-input-len: 300
-    random-output-len: 40
-    random-range-ratio: 0.2
-    random-mm-base-items-per-request: 2
-    random-mm-num-mm-items-range-ratio: 0
-    random-mm-limit-mm-per-prompt: '{"image":3,"video":0}'
-    random-mm-bucket-config: '{(256, 256, 1): 0.5, (720, 1280, 1): 0.5}'
-
-experiments:
-  - name: openai-text-10c
-    dataset: text_random_300x40
-    args:
-      max-concurrency: 10
-      request-rate: 50
-      ignore-eos: true
-      temperature: 0.0
-      top-p: 0.95
-
-  - name: openai-mm-10c
-    dataset: mm_two_images_two_sizes
-    args:
-      max-concurrency: 10
-      request-rate: 30
-      ignore-eos: true
-      temperature: 0.0
-      top-p: 0.95
-"""
 
 import argparse
 import asyncio
@@ -690,7 +624,7 @@ python3 benchmarks/openai_bench.py \
 
 """
 python3 benchmarks/openai_bench.py --config-yaml \
-  benchmarks/config_openai.yaml
+  benchmarks/experiments/random_mm_test.yaml
 """
 
 
@@ -700,5 +634,3 @@ if __name__ == "__main__":
     add_cli_args(parser)
     cli_args = parser.parse_args()
     asyncio.run(main_async(cli_args))
-
-

@@ -1114,7 +1114,7 @@ python3 benchmarks/async_llm.py \
 
 """
 python3 benchmarks/async_llm.py --config-yaml \
-    benchmarks/config.yaml
+    benchmarks/experiments/random_mm_test.yaml
 """
 
 async def main_async(args: argparse.Namespace) -> None:
