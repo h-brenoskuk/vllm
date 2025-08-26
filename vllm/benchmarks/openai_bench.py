@@ -6,6 +6,7 @@ import asyncio
 import json
 from contextlib import suppress
 from copy import deepcopy
+from datetime import datetime
 from typing import Any, cast
 
 try:
@@ -17,6 +18,8 @@ from transformers import PreTrainedTokenizerBase
 
 from vllm.benchmarks.datasets import get_samples  # type: ignore
 from vllm.benchmarks.datasets import SampleRequest, add_dataset_parser
+from vllm.benchmarks.lib.utils import (convert_to_pytorch_benchmark_format,
+                                       write_to_json)
 from vllm.benchmarks.serve import benchmark as serve_benchmark
 from vllm.benchmarks.serve import check_goodput_args
 from vllm.transformers_utils.tokenizer import get_tokenizer
@@ -355,6 +358,59 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
         help="Timeout in seconds waiting for endpoint readiness.",
     )
 
+    # Result saving options (parity with serve.py)
+    parser.add_argument(
+        "--label",
+        type=str,
+        default=None,
+        help="Optional label prefix for saved benchmark results.",
+    )
+    parser.add_argument(
+        "--save-result",
+        action="store_true",
+        help="Save benchmark results to a json file.",
+    )
+    parser.add_argument(
+        "--save-detailed",
+        action="store_true",
+        help=(
+            "When saving, include per-request details (responses, errors, "
+            "ttfts, tpots, itls)."
+        ),
+    )
+    parser.add_argument(
+        "--append-result",
+        action="store_true",
+        help="Append benchmark result to an existing json file.",
+    )
+    parser.add_argument(
+        "--metadata",
+        metavar="KEY=VALUE",
+        nargs="*",
+        help=(
+            "Key-value pairs (e.g., --metadata version=0.3.3 tp=1) to embed "
+            "in the result JSON for record keeping."
+        ),
+    )
+    parser.add_argument(
+        "--result-dir",
+        type=str,
+        default=None,
+        help=(
+            "Directory to save benchmark json results. Defaults to current "
+            "directory."
+        ),
+    )
+    parser.add_argument(
+        "--result-filename",
+        type=str,
+        default=None,
+        help=(
+            "Explicit filename for results. If not specified, a name is "
+            "generated from label, qps, model and timestamp."
+        ),
+    )
+
 
 class OpenAIBenchmarkManager:
     """Run multiple experiments sequentially with API reuse.
@@ -542,7 +598,7 @@ class OpenAIBenchmarkManager:
                 model_name_for_api = (args_for_run.served_model_name
                                       or args_for_run.model)
 
-                await serve_benchmark(
+                result = await serve_benchmark(
                     endpoint_type=args_for_run.endpoint_type,
                     api_url=api_url,
                     base_url=base_url,
@@ -572,6 +628,121 @@ class OpenAIBenchmarkManager:
                     ready_check_timeout_sec=args_for_run.
                     ready_check_timeout_sec,
                 )
+
+                # Optionally save results to JSON
+                if args_for_run.save_result or args_for_run.append_result:
+                    current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
+                    result_json: dict[str, Any] = {}
+
+                    # Setup
+                    result_json["date"] = current_dt
+                    result_json["endpoint_type"] = args_for_run.endpoint_type
+                    result_json["label"] = args_for_run.label
+                    result_json["model_id"] = model_id_for_api
+                    result_json["tokenizer_id"] = tokenizer_id
+                    result_json["num_prompts"] = dataset_args.num_prompts
+
+                    # Metadata
+                    if args_for_run.metadata:
+                        for item in args_for_run.metadata:
+                            if "=" in item:
+                                kv = item.split("=", 1)
+                                result_json[kv[0].strip()] = kv[1].strip()
+                            else:
+                                raise ValueError(
+                                    "Invalid metadata format. Use KEY=VALUE.")
+
+                    # Traffic
+                    result_json["request_rate"] = (
+                        args_for_run.request_rate
+                        if args_for_run.request_rate < float("inf")
+                        else "inf"
+                    )
+                    result_json["burstiness"] = args_for_run.burstiness
+                    result_json["max_concurrency"] = (
+                        args_for_run.max_concurrency
+                    )
+
+                    # Merge with benchmark result
+                    result_json = {**result_json, **result}
+
+                    # Drop large fields if not requested
+                    if not args_for_run.save_detailed:
+                        for field in [
+                            "input_lens",
+                            "output_lens",
+                            "ttfts",
+                            "itls",
+                            "generated_texts",
+                            "errors",
+                        ]:
+                            if field in result_json:
+                                del result_json[field]
+                            if field in result:
+                                del result[field]
+
+                    # Build filename
+                    base_model_id = model_id_for_api.split("/")[-1]
+                    max_conc_str = (
+                        f"-concurrency{args_for_run.max_concurrency}"
+                        if args_for_run.max_concurrency is not None
+                        else ""
+                    )
+                    label = args_for_run.label or args_for_run.endpoint_type
+                    file_name = (
+                        f"{label}-{args_for_run.request_rate}qps{max_conc_str}-"
+                        f"{base_model_id}-{current_dt}.json"
+                    )
+                    if args_for_run.result_filename:
+                        file_name = args_for_run.result_filename
+                    if args_for_run.result_dir:
+                        import os as _os
+                        _os.makedirs(args_for_run.result_dir, exist_ok=True)
+                        file_name = _os.path.join(args_for_run.result_dir,
+                                                  file_name)
+
+                    # Write JSON
+                    import json as _json
+                    with open(
+                        file_name,
+                        mode=("a+" if args_for_run.append_result else "w"),
+                        encoding="utf-8",
+                    ) as outfile:
+                        if args_for_run.append_result and outfile.tell() != 0:
+                            outfile.write("\n")
+                        _json.dump(result_json, outfile)
+
+                    # Optional: also save in PyTorch benchmark format
+                    pt_metrics = [
+                        "median_ttft_ms",
+                        "mean_ttft_ms",
+                        "std_ttft_ms",
+                        "p99_ttft_ms",
+                        "mean_tpot_ms",
+                        "median_tpot_ms",
+                        "std_tpot_ms",
+                        "p99_tpot_ms",
+                        "median_itl_ms",
+                        "mean_itl_ms",
+                        "std_itl_ms",
+                        "p99_itl_ms",
+                    ]
+                    ignored = ["ttfts", "itls", "generated_texts", "errors"]
+                    pt_records = convert_to_pytorch_benchmark_format(
+                        args=args_for_run,
+                        metrics={
+                            k: [result_json[k]] for k in pt_metrics
+                            if k in result_json
+                        },
+                        extra_info={
+                            k: result_json[k]
+                            for k in result_json
+                            if k not in pt_metrics and k not in ignored
+                        },
+                    )
+                    if pt_records:
+                        pt_file = f"{file_name.rsplit('.', 1)[0]}.pytorch.json"
+                        write_to_json(pt_file, pt_records)
 
         print("All experiments completed.")
 
@@ -618,7 +789,7 @@ async def main_async(args: argparse.Namespace) -> None:
     api_url = f"{args.base_url}{args.endpoint}"
     base_url = f"{args.base_url}"
 
-    await serve_benchmark(
+    result = await serve_benchmark(
         endpoint_type=args.endpoint_type,
         api_url=api_url,
         base_url=base_url,
@@ -644,6 +815,114 @@ async def main_async(args: argparse.Namespace) -> None:
         ramp_up_end_rps=None,
         ready_check_timeout_sec=args.ready_check_timeout_sec,
     )
+
+    # Optionally save results to JSON
+    if args.save_result or args.append_result:
+        current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
+        result_json: dict[str, Any] = {}
+
+        # Setup
+        result_json["date"] = current_dt
+        result_json["endpoint_type"] = args.endpoint_type
+        result_json["label"] = args.label
+        result_json["model_id"] = args.model
+        result_json["tokenizer_id"] = tokenizer_id
+        result_json["num_prompts"] = args.num_prompts
+
+        # Metadata
+        if args.metadata:
+            for item in args.metadata:
+                if "=" in item:
+                    kv = item.split("=", 1)
+                    result_json[kv[0].strip()] = kv[1].strip()
+                else:
+                    raise ValueError("Invalid metadata format. Use KEY=VALUE.")
+
+        # Traffic
+        result_json["request_rate"] = (
+            args.request_rate if args.request_rate < float("inf") else "inf"
+        )
+        result_json["burstiness"] = args.burstiness
+        result_json["max_concurrency"] = args.max_concurrency
+
+        # Merge with benchmark result
+        result_json = {**result_json, **result}
+
+        # Drop large fields if not requested
+        if not args.save_detailed:
+            for field in [
+                "input_lens",
+                "output_lens",
+                "ttfts",
+                "itls",
+                "generated_texts",
+                "errors",
+            ]:
+                if field in result_json:
+                    del result_json[field]
+                if field in result:
+                    del result[field]
+
+        # Build filename
+        base_model_id = args.model.split("/")[-1]
+        max_conc_str = (
+            f"-concurrency{args.max_concurrency}"
+            if args.max_concurrency is not None
+            else ""
+        )
+        label = args.label or args.endpoint_type
+        file_name = (
+            f"{label}-{args.request_rate}qps{max_conc_str}-"
+            f"{base_model_id}-{current_dt}.json"
+        )
+        if args.result_filename:
+            file_name = args.result_filename
+        if args.result_dir:
+            import os as _os
+            _os.makedirs(args.result_dir, exist_ok=True)
+            file_name = _os.path.join(args.result_dir, file_name)
+
+        # Write JSON
+        import json as _json
+        with open(
+            file_name,
+            mode=("a+" if args.append_result else "w"),
+            encoding="utf-8",
+        ) as outfile:
+            if args.append_result and outfile.tell() != 0:
+                outfile.write("\n")
+            _json.dump(result_json, outfile)
+
+        # Optional: also save in PyTorch benchmark format
+        pt_metrics = [
+            "median_ttft_ms",
+            "mean_ttft_ms",
+            "std_ttft_ms",
+            "p99_ttft_ms",
+            "mean_tpot_ms",
+            "median_tpot_ms",
+            "std_tpot_ms",
+            "p99_tpot_ms",
+            "median_itl_ms",
+            "mean_itl_ms",
+            "std_itl_ms",
+            "p99_itl_ms",
+        ]
+        ignored = ["ttfts", "itls", "generated_texts", "errors"]
+        pt_records = convert_to_pytorch_benchmark_format(
+            args=args,
+            metrics={
+                k: [result_json[k]] for k in pt_metrics if k in result_json
+            },
+            extra_info={
+                k: result_json[k]
+                for k in result_json
+                if k not in pt_metrics and k not in ignored
+            },
+        )
+        if pt_records:
+            pt_file = f"{file_name.rsplit('.', 1)[0]}.pytorch.json"
+            write_to_json(pt_file, pt_records)
 
 """
 vllm serve Qwen/Qwen2.5-VL-3B-Instruct \
@@ -679,6 +958,13 @@ python3 benchmarks/openai_bench.py \
 """
 python3 benchmarks/openai_bench.py --config-yaml \
   benchmarks/experiments/random_mm_test.yaml
+"""
+
+"""
+python3 benchmarks/openai_bench.py \
+    --config-yaml benchmarks/experiments/random_mm_test.yaml \
+    --save-result --label openai_bench \
+    --result-dir results/openai_bench/random_mm_test
 """
 
 

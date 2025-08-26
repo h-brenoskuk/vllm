@@ -8,6 +8,7 @@ import time
 from collections.abc import AsyncGenerator, Iterable
 from contextlib import suppress
 from copy import deepcopy
+from datetime import datetime
 
 import numpy as np
 from tqdm.asyncio import tqdm
@@ -616,6 +617,25 @@ def add_cli_args(parser) -> None:
     sampling_group.add_argument("--min-p", type=float, default=None)
     sampling_group.add_argument("--temperature", type=float, default=0.0)
 
+    # Percentile reporting (parity with serve.py)
+    parser.add_argument(
+        "--percentile-metrics",
+        type=str,
+        default="ttft,tpot,itl",
+        help=(
+            "Comma-separated list of metric names to report percentiles for. "
+            "Allowed: ttft,tpot,itl"
+        ),
+    )
+    parser.add_argument(
+        "--metric-percentiles",
+        type=str,
+        default="99",
+        help=(
+            "Comma-separated list of percentiles to report (e.g., 25,50,75)."
+        ),
+    )
+
     # Engine/model args
     parser.add_argument(
         "--model",
@@ -652,6 +672,58 @@ def add_cli_args(parser) -> None:
     parser.add_argument("--enable-prefix-caching",
                         action="store_true",
                         help="Enable prefix caching.")
+
+    # Result saving options (parity with serve.py)
+    parser.add_argument(
+        "--label",
+        type=str,
+        default=None,
+        help="Optional label prefix for saved benchmark results.",
+    )
+    parser.add_argument(
+        "--save-result",
+        action="store_true",
+        help="Save benchmark results to a json file.",
+    )
+    parser.add_argument(
+        "--save-detailed",
+        action="store_true",
+        help=(
+            "When saving, include detailed arrays like ttfts and itls."
+        ),
+    )
+    parser.add_argument(
+        "--append-result",
+        action="store_true",
+        help="Append benchmark result to an existing json file.",
+    )
+    parser.add_argument(
+        "--metadata",
+        metavar="KEY=VALUE",
+        nargs="*",
+        help=(
+            "Key-value pairs (e.g., --metadata version=0.3.3 tp=1) to embed "
+            "in the result JSON for record keeping."
+        ),
+    )
+    parser.add_argument(
+        "--result-dir",
+        type=str,
+        default=None,
+        help=(
+            "Directory to save benchmark json results. Defaults to current "
+            "directory."
+        ),
+    )
+    parser.add_argument(
+        "--result-filename",
+        type=str,
+        default=None,
+        help=(
+            "Explicit filename for results. If not specified, a name is "
+            "generated from label, qps, model and timestamp."
+        ),
+    )
 
 
 async def get_request(
@@ -838,6 +910,178 @@ async def run_single_experiment(
     # Print detailed metrics
     print()  # Add some space
     metrics_collector.print_metrics()
+
+    # Build a result dict mirroring serve.py's outputs for saving
+    # Aggregate per-request lengths are not tracked here; keep structure similar
+    percentiles = [
+        float(p)
+        for p in str(getattr(args, "metric_percentiles", "99")).split(",")
+    ]
+    selected = set(
+        str(getattr(args, "percentile_metrics", "ttft,tpot,itl")).split(",")
+    )
+
+    ttft_ms = [t * 1000.0 for t in metrics_collector.ttft_values]
+    # Recompute per-request TPOT from finished requests
+    per_request_tpot_ms = [
+        (fr.decode_time / (fr.num_generation_tokens - 1)) * 1000.0
+        for fr in metrics_collector.finished_requests
+        if fr.num_generation_tokens > 1 and fr.decode_time > 0
+    ]
+    itl_ms = [t * 1000.0 for t in metrics_collector.itl_values]
+
+    def _mean(vals: list[float]) -> float:
+        return float(np.mean(vals)) if vals else 0.0
+
+    def _median(vals: list[float]) -> float:
+        return float(np.median(vals)) if vals else 0.0
+    
+    def _percentiles(vals: list[float]) -> list[tuple[float, float]]:
+        if not vals:
+            return [(p, 0.0) for p in percentiles]
+        return [(p, float(np.percentile(vals, p))) for p in percentiles]
+
+    duration = metrics_collector.get_duration()
+    result: dict[str, Any] = {
+        "duration": duration,
+        "completed": metrics_collector.total_requests_completed,
+        "total_input_tokens": metrics_collector.total_prompt_tokens,
+        "total_output_tokens": metrics_collector.total_generation_tokens,
+        "request_throughput": (
+            metrics_collector.total_requests_completed / duration
+            if duration > 0
+            else 0.0
+        ),
+        "output_throughput": (
+            metrics_collector.total_generation_tokens / duration
+            if duration > 0
+            else 0.0
+        ),
+        "total_token_throughput": (
+            (
+                metrics_collector.total_prompt_tokens
+                + metrics_collector.total_generation_tokens
+            )
+            / duration
+            if duration > 0
+            else 0.0
+        ),
+        # Raw arrays for detailed save
+        "ttfts": [t / 1000.0 for t in ttft_ms],  # keep seconds for parity
+        "itls": [t / 1000.0 for t in itl_ms],    # keep seconds for parity
+        # Placeholders to keep structure; not collecting texts/errors here
+        "generated_texts": [],
+        "errors": [],
+    }
+
+    # Add percentile-backed metrics similarly to serve.py
+    if "ttft" in selected:
+        result.update({
+            "mean_ttft_ms": _mean(ttft_ms),
+            "median_ttft_ms": _median(ttft_ms),
+            "std_ttft_ms": float(np.std(ttft_ms)) if ttft_ms else 0.0,
+        })
+        for p, val in _percentiles(ttft_ms):
+            p_word = str(int(p)) if int(p) == p else str(p)
+            result[f"p{p_word}_ttft_ms"] = val
+
+    if "tpot" in selected:
+        result.update({
+            "mean_tpot_ms": _mean(per_request_tpot_ms),
+            "median_tpot_ms": _median(per_request_tpot_ms),
+            "std_tpot_ms": float(np.std(per_request_tpot_ms))
+            if per_request_tpot_ms else 0.0,
+        })
+        for p, val in _percentiles(per_request_tpot_ms):
+            p_word = str(int(p)) if int(p) == p else str(p)
+            result[f"p{p_word}_tpot_ms"] = val
+
+    if "itl" in selected:
+        result.update({
+            "mean_itl_ms": _mean(itl_ms),
+            "median_itl_ms": _median(itl_ms),
+            "std_itl_ms": float(np.std(itl_ms)) if itl_ms else 0.0,
+        })
+        for p, val in _percentiles(itl_ms):
+            p_word = str(int(p)) if int(p) == p else str(p)
+            result[f"p{p_word}_itl_ms"] = val
+
+    # Optionally save results
+    if (
+        getattr(args, "save_result", False)
+        or getattr(args, "append_result", False)
+    ):
+        current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
+        result_json: dict[str, Any] = {}
+
+        # Setup
+        result_json["date"] = current_dt
+        result_json["endpoint_type"] = args.endpoint_type
+        result_json["label"] = args.label
+        result_json["model_id"] = args.model
+        result_json["tokenizer_id"] = args.model  # tokenizer from engine
+        result_json["num_prompts"] = getattr(args, "num_prompts", None)
+
+        # Metadata
+        if getattr(args, "metadata", None):
+            for item in args.metadata:
+                if "=" in item:
+                    kv = item.split("=", 1)
+                    result_json[kv[0].strip()] = kv[1].strip()
+                else:
+                    raise ValueError("Invalid metadata format. Use KEY=VALUE.")
+
+        # Traffic
+        result_json["request_rate"] = (
+            args.request_rate if args.request_rate < float("inf") else "inf"
+        )
+        result_json["max_concurrency"] = args.max_concurrency
+
+        # Merge
+        result_json = {**result_json, **result}
+
+        # Drop large fields if not requested
+        if not getattr(args, "save_detailed", False):
+            for field in [
+                "ttfts",
+                "itls",
+                "generated_texts",
+                "errors",
+            ]:
+                if field in result_json:
+                    del result_json[field]
+                if field in result:
+                    del result[field]
+
+        # Build filename
+        base_model_id = str(args.model).split("/")[-1]
+        max_conc_str = (
+            f"-concurrency{args.max_concurrency}"
+            if args.max_concurrency is not None
+            else ""
+        )
+        label = args.label or "async-llm"
+        file_name = (
+            f"{label}-{args.request_rate}qps{max_conc_str}-"
+            f"{base_model_id}-{current_dt}.json"
+        )
+        if getattr(args, "result_filename", None):
+            file_name = args.result_filename
+        if getattr(args, "result_dir", None):
+            import os as _os
+            _os.makedirs(args.result_dir, exist_ok=True)
+            file_name = _os.path.join(args.result_dir, file_name)
+
+        # Write JSON
+        import json as _json
+        with open(
+            file_name,
+            mode=("a+" if getattr(args, "append_result", False) else "w"),
+            encoding="utf-8",
+        ) as outfile:
+            if getattr(args, "append_result", False) and outfile.tell() != 0:
+                outfile.write("\n")
+            _json.dump(result_json, outfile)
 
     return engine, metrics_collector
 
@@ -1138,6 +1382,13 @@ python3 benchmarks/async_llm.py \
 python3 benchmarks/async_llm.py --config-yaml \
     benchmarks/experiments/random_mm_test.yaml
 """
+"""
+python3 benchmarks/async_llm.py \
+    --config-yaml benchmarks/experiments/random_mm_test.yaml \
+    --save-result --label async_llm \
+    --result-dir results/async_llm/random_mm_test
+"""
+
 
 async def main_async(args: argparse.Namespace) -> None:
     # Enforce that a model is provided in single-run mode.
