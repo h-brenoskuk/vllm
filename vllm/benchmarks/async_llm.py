@@ -951,6 +951,17 @@ class BenchmarkManager:
         if not isinstance(cfg, dict):
             raise ValueError("YAML must be a mapping with 'experiments' list")
 
+        # Disallow CLI tokenizer/model overrides in YAML mode
+        if any([
+                getattr(base_args, "model", None) is not None,
+                getattr(base_args, "tokenizer", None) is not None,
+                getattr(base_args, "tokenizer_mode", "auto") != "auto",
+                bool(getattr(base_args, "trust_remote_code", False)),
+        ]):
+            raise ValueError(
+                "In --config-yaml mode, specify tokenizer/model only "
+                "under 'engine' section; do not pass them via CLI.")
+
         engine_overrides = cfg.get("engine", {}) or {}
         experiments = cfg.get("experiments", [])
         datasets_map = cfg.get("datasets", {}) or {}
@@ -959,6 +970,17 @@ class BenchmarkManager:
             raise ValueError("'experiments' must be a list")
         if not isinstance(datasets_map, dict):
             raise ValueError("'datasets' must be a mapping of name -> config")
+
+        # Enforce schema: tokenizer-related keys must be under 'engine'
+        api_cfg = cfg.get("api", {}) or {}
+        forbidden_api_keys = {
+            "tokenizer", "tokenizer-mode", "trust-remote-code", "model"
+        }
+        bad_keys = sorted(k for k in api_cfg if k in forbidden_api_keys)
+        if bad_keys:
+            raise ValueError(
+                "Move these keys from 'api' to 'engine': "
+                + ", ".join(bad_keys))
 
         # Apply top-level engine overrides once (single engine across runs)
         if engine_overrides:

@@ -127,8 +127,6 @@ def _parse_mm_bucket_config_value(v: Any) -> dict[tuple[int, int, int], float]:
 
 def _coerce_override_value(key: str, value: Any) -> Any:
     """Coerce YAML override values to expected CLI types.
-
-    Mirrors async_llm.py so dataset overrides behave identically.
     """
     float_keys = {
         "request_rate",
@@ -353,7 +351,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--ready-check-timeout-sec",
         type=int,
-        default=600,
+        default=60,
         help="Timeout in seconds waiting for endpoint readiness.",
     )
 
@@ -362,7 +360,8 @@ class OpenAIBenchmarkManager:
     """Run multiple experiments sequentially with API reuse.
 
     YAML schema keys:
-      - api: OpenAI/OpenAI-compatible connection and model fields
+      - engine: tokenizer/model related fields (single source of truth)
+      - api: OpenAI/OpenAI-compatible connection fields (no tokenizer/model)
       - datasets: dataset configurations (same as serve.py/add_dataset_parser)
       - experiments: list of experiments that select a dataset and override
         traffic/sampling knobs
@@ -409,7 +408,20 @@ class OpenAIBenchmarkManager:
         if not isinstance(cfg, dict):
             raise ValueError("YAML must be a mapping with 'experiments' list")
 
-        api_overrides = cfg.get("api", {}) or {}
+        # Disallow CLI tokenizer/model overrides in YAML mode
+        if any([
+                getattr(base_args, "model", None) is not None,
+                getattr(base_args, "tokenizer", None) is not None,
+                getattr(base_args, "tokenizer_mode", "auto") != "auto",
+                bool(getattr(base_args, "trust_remote_code", False)),
+        ]):
+            raise ValueError(
+                "In --config-yaml mode, specify tokenizer/model only "
+                "under 'engine' section; do not pass them via CLI.")
+
+        # Read sections (api is optional for async_llm compatibility)
+        api_cfg = cfg.get("api", {}) or {}
+        engine_overrides = cfg.get("engine", {}) or {}
         experiments = cfg.get("experiments", [])
         datasets_map = cfg.get("datasets", {}) or {}
 
@@ -418,19 +430,43 @@ class OpenAIBenchmarkManager:
         if not isinstance(datasets_map, dict):
             raise ValueError("'datasets' must be a mapping of name -> config")
 
-        # Apply top-level API overrides once (single tokenizer across runs)
-        if api_overrides:
-            normalized_overrides = {
-                k.replace("-", "_"): v for k, v in api_overrides.items()
-            }
-            base_args = self._apply_overrides(base_args, normalized_overrides)
+        # Enforce schema: tokenizer-related keys must be under 'engine'
+        forbidden_api_keys = {
+            "tokenizer", "tokenizer-mode", "trust-remote-code", "model"
+        }
+        bad_keys = sorted(k for k in api_cfg if k in forbidden_api_keys)
+        if bad_keys:
+            raise ValueError(
+                "Move these keys from 'api' to 'engine': "
+                + ", ".join(bad_keys))
 
-        # Resolve tokenizer id
+        # Apply engine configuration (single source of truth)
+        if engine_overrides:
+            normalized_engine_overrides = {
+                k.replace("-", "_"): v for k, v in engine_overrides.items()
+            }
+            base_args = self._apply_overrides(base_args,
+                                              normalized_engine_overrides)
+
+        # Apply API connectivity fields (no tokenizer/model here)
+        if api_cfg:
+            allowed_api_keys = {
+                "base-url", "endpoint", "endpoint-type", "backend",
+                "logprobs", "ready-check-timeout-sec"
+            }
+            normalized_api = {
+                k.replace("-", "_"): v for k, v in api_cfg.items()
+                if k in allowed_api_keys
+            }
+            if normalized_api:
+                base_args = self._apply_overrides(base_args, normalized_api)
+
+        # Resolve tokenizer id from engine config
         tokenizer_id = (base_args.tokenizer if base_args.tokenizer is not None
                         else base_args.model)
         if tokenizer_id is None:
             raise ValueError(
-                "Model must be specified via 'api.model' or CLI --model")
+                "Unable to retrieve tokenizer from configs.")
 
         tokenizer = get_tokenizer(tokenizer_id,
                                   tokenizer_mode=base_args.tokenizer_mode,
@@ -457,6 +493,7 @@ class OpenAIBenchmarkManager:
         # Iterate datasets in YAML-defined order
         for dataset_name, dataset_cfg in datasets_map.items():
             if dataset_name not in experiments_by_dataset:
+                # This dataset is not used in any experiment, skip it
                 continue
 
             dataset_args = self._apply_overrides(base_args, {
@@ -465,7 +502,7 @@ class OpenAIBenchmarkManager:
 
             if not getattr(dataset_args, "model", None):
                 raise ValueError(
-                    "Model must be specified via 'api.model' or CLI --model"
+                    "Model must be specified via 'engine.model' or CLI --model"
                 )
 
             # Precompute and cache sample requests for this dataset once
@@ -500,12 +537,17 @@ class OpenAIBenchmarkManager:
                 api_url = f"{args_for_run.base_url}{args_for_run.endpoint}"
                 base_url = f"{args_for_run.base_url}"
 
+                # Determine model identifiers for API
+                model_id_for_api = args_for_run.model
+                model_name_for_api = (args_for_run.served_model_name
+                                      or args_for_run.model)
+
                 await serve_benchmark(
                     endpoint_type=args_for_run.endpoint_type,
                     api_url=api_url,
                     base_url=base_url,
-                    model_id=args_for_run.model,
-                    model_name=args_for_run.served_model_name,
+                    model_id=model_id_for_api,
+                    model_name=model_name_for_api,
                     tokenizer=cast(PreTrainedTokenizerBase, tokenizer),
                     input_requests=precomputed_requests,
                     logprobs=args_for_run.logprobs,
@@ -602,6 +644,18 @@ async def main_async(args: argparse.Namespace) -> None:
         ramp_up_end_rps=None,
         ready_check_timeout_sec=args.ready_check_timeout_sec,
     )
+
+"""
+vllm serve Qwen/Qwen2.5-VL-3B-Instruct \
+    --tensor-parallel-size 1 \
+    --pipeline-parallel-size 1 \
+    --dtype bfloat16 \
+    --gpu-memory-utilization 0.9 \
+    --max-model-len 16384 \
+    --limit-mm-per-prompt "image=3,video=0" \
+    --mm-processor-kwargs max_pixels=1003520 \
+    --guided-decoding-backend "xgrammar"
+"""
 
 """
 python3 benchmarks/openai_bench.py \

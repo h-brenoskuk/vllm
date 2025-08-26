@@ -3,9 +3,6 @@ api:
   backend: openai
   base-url: http://127.0.0.1:8000
   endpoint: /v1/chat/completions
-  model: Qwen/Qwen2.5-VL-3B-Instruct
-  tokenizer-mode: auto
-  trust-remote-code: false
   logprobs: null
 
 engine:
@@ -19,6 +16,8 @@ engine:
   mm-processor-kwargs: "max_pixels=1003520"
   guided-decoding-backend: xgrammar
   enable-prefix-caching: false
+  tokenizer-mode: auto
+  trust-remote-code: false
 
 datasets:
   text_only:
