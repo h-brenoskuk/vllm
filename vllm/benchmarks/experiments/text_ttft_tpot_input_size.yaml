@@ -1,0 +1,192 @@
+api:
+  endpoint-type: openai-chat
+  backend: openai
+  base-url: http://127.0.0.1:8000
+  endpoint: /v1/chat/completions
+  logprobs: null
+
+engine:
+  model: Qwen/Qwen2.5-VL-3B-Instruct
+  tensor-parallel-size: 1
+  pipeline-parallel-size: 1
+  dtype: bfloat16
+  gpu-memory-utilization: 0.9
+  max-model-len: 16384
+  limit-mm-per-prompt: "image=3,video=0"
+  mm-processor-kwargs: "max_pixels=1003520"
+  guided-decoding-backend: xgrammar
+  enable-prefix-caching: false
+  tokenizer-mode: auto
+  trust-remote-code: false
+
+datasets:
+  text_10_10:
+    dataset-name: random
+    seed: 42
+    num-prompts: 10
+    random-prefix-len: 0
+    random-input-len: 10
+    random-output-len: 2
+    random-range-ratio: 0
+  text_10_20:
+    dataset-name: random
+    seed: 42
+    num-prompts: 10
+    random-prefix-len: 0
+    random-input-len: 20
+    random-output-len: 2
+    random-range-ratio: 0
+  text_10_50:
+    dataset-name: random
+    seed: 42
+    num-prompts: 10
+    random-prefix-len: 0
+    random-input-len: 50
+    random-output-len: 2
+    random-range-ratio: 0
+  text_10_100:
+    dataset-name: random
+    seed: 42
+    num-prompts: 10
+    random-prefix-len: 0
+    random-input-len: 100
+    random-output-len: 2
+    random-range-ratio: 0
+  text_10_200:
+    dataset-name: random
+    seed: 42
+    num-prompts: 10
+    random-prefix-len: 0
+    random-input-len: 200
+    random-output-len: 2
+    random-range-ratio: 0
+  text_10_250:
+    dataset-name: random
+    seed: 42
+    num-prompts: 10
+    random-prefix-len: 0
+    random-input-len: 250
+    random-output-len: 2
+    random-range-ratio: 0
+  text_10_500:
+    dataset-name: random
+    seed: 42
+    num-prompts: 10
+    random-prefix-len: 0
+    random-input-len: 500
+    random-output-len: 2
+    random-range-ratio: 0
+  text_10_750:
+    dataset-name: random
+    seed: 42
+    num-prompts: 10
+    random-prefix-len: 0
+    random-input-len: 750
+    random-output-len: 2
+    random-range-ratio: 0
+  text_10_1500:
+    dataset-name: random
+    seed: 42
+    num-prompts: 10
+    random-prefix-len: 0
+    random-input-len: 1500
+    random-output-len: 2
+    random-range-ratio: 0
+  text_10_3000:
+    dataset-name: random
+    seed: 42
+    num-prompts: 10
+    random-prefix-len: 0
+    random-input-len: 3000
+    random-output-len: 2
+    random-range-ratio: 0
+  text_10_5000:
+    dataset-name: random
+    seed: 42
+    num-prompts: 10
+    random-prefix-len: 0
+    random-input-len: 5000
+    random-output-len: 2
+    random-range-ratio: 0
+  text_10_8000:
+    dataset-name: random
+    seed: 42
+    num-prompts: 10
+    random-prefix-len: 0
+    random-input-len: 8000
+    random-output-len: 2
+    random-range-ratio: 0
+
+experiments:
+  - name: 10_c1
+    dataset: text_10_10
+    args:
+      max-concurrency: 1
+      request-rate: inf
+      ignore-eos: true
+  - name: 20_c1
+    dataset: text_10_20
+    args:
+      max-concurrency: 1
+      request-rate: inf
+      ignore-eos: true
+  - name: 50_c1
+    dataset: text_10_50
+    args:
+      max-concurrency: 1
+      request-rate: inf
+      ignore-eos: true
+  - name: 100_c1
+    dataset: text_10_100
+    args:
+      max-concurrency: 1
+      request-rate: inf
+      ignore-eos: true
+  - name: 200_c1
+    dataset: text_10_200
+    args:
+      max-concurrency: 1
+      request-rate: inf
+      ignore-eos: true
+  - name: 250_c1
+    dataset: text_10_250
+    args:
+      max-concurrency: 1
+      request-rate: inf
+      ignore-eos: true
+  - name: 500_c1
+    dataset: text_10_500
+    args:
+      max-concurrency: 1
+      request-rate: inf
+      ignore-eos: true
+  - name: 750_c1
+    dataset: text_10_750
+    args:
+      max-concurrency: 1
+      request-rate: inf
+      ignore-eos: true
+  - name: 1500_c1
+    dataset: text_10_1500
+    args:
+      max-concurrency: 1
+      request-rate: inf
+      ignore-eos: true
+  - name: 3000_c1
+    dataset: text_10_3000
+    args:
+      max-concurrency: 1
+      request-rate: inf
+      ignore-eos: true
+  - name: 5000_c1
+    dataset: text_10_5000
+    args:
+      max-concurrency: 1
+      request-rate: inf
+      ignore-eos: true
+  - name: 8000_c1
+    dataset: text_10_8000
+    args:
+      max-concurrency: 1
+      request-rate: inf
+      ignore-eos: true

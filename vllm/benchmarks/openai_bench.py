@@ -955,18 +955,48 @@ python3 benchmarks/openai_bench.py \
   --seed 42
 """
 
+# Basic benchmark
 """
 python3 benchmarks/openai_bench.py --config-yaml \
   benchmarks/experiments/random_mm_test.yaml
 """
 
+# Save to json
 """
 python3 benchmarks/openai_bench.py \
     --config-yaml benchmarks/experiments/random_mm_test.yaml \
     --save-result --label openai_bench \
-    --result-dir results/openai_bench/random_mm_test
+    --result-dir results/openai_bench/random_mm_test/ttft_tpot_itl
 """
 
+# text_ttft_tpot_input_size
+"""
+python3 benchmarks/openai_bench.py \
+    --config-yaml benchmarks/experiments/text_ttft_tpot_input_size.yaml \
+    --save-result --label openai_bench \
+    --result-dir results/openai_bench/text_ttft_tpot_input_size
+"""
+
+# e2el percentile metrics
+"""
+python3 benchmarks/openai_bench.py \
+    --config-yaml benchmarks/experiments/max_concurrency.yaml \
+    --percentile-metrics e2el \
+    --metric-percentiles 0,25,50,75,95,100 \
+    --save-result --label openai_bench \
+    --result-dir results/openai_bench/max_concurrency/e2el_percentiles
+"""
+
+# detailed metrics + e2el percentile metrics
+"""
+python3 benchmarks/openai_bench.py \
+  --config-yaml benchmarks/experiments/random_mm_test.yaml \
+  --percentile-metrics e2el \
+  --metric-percentiles 0,25,50,75,95,100 \
+  --save-result --save-detailed \
+  --label openai_bench \
+  --result-dir results/openai_bench/random_mm_test/detailed_metrics
+"""
 
 
 if __name__ == "__main__":
