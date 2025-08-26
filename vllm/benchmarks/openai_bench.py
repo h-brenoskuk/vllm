@@ -966,7 +966,7 @@ python3 benchmarks/openai_bench.py --config-yaml \
 python3 benchmarks/openai_bench.py \
     --config-yaml benchmarks/experiments/random_mm_test.yaml \
     --save-result --label openai_bench \
-    --result-dir results/openai_bench/random_mm_test/ttft_tpot_itl
+    --result-dir results/openai_bench/random_mm_test/
 """
 
 # text_ttft_tpot_input_size
@@ -984,7 +984,7 @@ python3 benchmarks/openai_bench.py \
     --percentile-metrics e2el \
     --metric-percentiles 0,25,50,75,95,100 \
     --save-result --label openai_bench \
-    --result-dir results/openai_bench/max_concurrency/e2el_percentiles
+    --result-dir results/openai_bench/max_concurrency
 """
 
 # detailed metrics + e2el percentile metrics
@@ -995,7 +995,7 @@ python3 benchmarks/openai_bench.py \
   --metric-percentiles 0,25,50,75,95,100 \
   --save-result --save-detailed \
   --label openai_bench \
-  --result-dir results/openai_bench/random_mm_test/detailed_metrics
+  --result-dir results/openai_bench/random_mm_test/
 """
 
 
