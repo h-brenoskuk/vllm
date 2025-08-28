@@ -12,8 +12,8 @@ engine:
   dtype: bfloat16
   gpu-memory-utilization: 0.9
   max-model-len: 16384
-  limit-mm-per-prompt: "image=3,video=0"
-  mm-processor-kwargs: "max_pixels=1003520"
+  limit-mm-per-prompt: '{"image":3,"video":0}'
+  mm-processor-kwargs: '{"max_pixels":1003520}'
   guided-decoding-backend: xgrammar
   enable-prefix-caching: false
   tokenizer-mode: auto

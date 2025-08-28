@@ -925,15 +925,15 @@ async def main_async(args: argparse.Namespace) -> None:
             write_to_json(pt_file, pt_records)
 
 """
-vllm serve Qwen/Qwen2.5-VL-3B-Instruct \
+    vllm serve Qwen/Qwen2.5-VL-3B-Instruct \
     --tensor-parallel-size 1 \
     --pipeline-parallel-size 1 \
     --dtype bfloat16 \
     --gpu-memory-utilization 0.9 \
     --max-model-len 16384 \
-    --limit-mm-per-prompt "image=3,video=0" \
-    --mm-processor-kwargs max_pixels=1003520 \
-    --guided-decoding-backend "xgrammar"
+    --limit-mm-per-prompt '{"image":3,"video":0}' \
+    --mm-processor-kwargs '{"max_pixels":1003520}' \
+    --guided-decoding-backend xgrammar
 """
 
 """
