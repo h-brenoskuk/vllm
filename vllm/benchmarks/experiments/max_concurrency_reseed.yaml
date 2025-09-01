@@ -1,0 +1,194 @@
+api:
+  endpoint-type: openai-chat
+  backend: openai
+  base-url: http://127.0.0.1:8000
+  endpoint: /v1/chat/completions
+  logprobs: null
+
+engine:
+  model: Qwen/Qwen2.5-VL-3B-Instruct
+  tensor-parallel-size: 1
+  pipeline-parallel-size: 1
+  dtype: bfloat16
+  gpu-memory-utilization: 0.9
+  max-model-len: 16384
+  limit-mm-per-prompt: '{"image":3,"video":0}'
+  mm-processor-kwargs: '{"max_pixels":1003520}'
+  guided-decoding-backend: xgrammar
+  enable-prefix-caching: false
+  tokenizer-mode: auto
+  trust-remote-code: false
+
+datasets:
+  text_720_1280_43:
+    dataset-name: random-mm
+    seed: 43
+    num-prompts: 400
+    random-prefix-len: 100
+    random-input-len: 300
+    random-output-len: 100
+    random-range-ratio: 0.2
+    random-mm-base-items-per-request: 1
+    random-mm-num-mm-items-range-ratio: 0
+    random-mm-limit-mm-per-prompt: '{"image":3,"video":0}'
+    random-mm-bucket-config: '{(720, 1280, 1): 1.0}'
+  text_720_1280_44:
+    dataset-name: random-mm
+    seed: 44
+    num-prompts: 400
+    random-prefix-len: 100
+    random-input-len: 300
+    random-output-len: 100
+    random-range-ratio: 0.2
+    random-mm-base-items-per-request: 1
+    random-mm-num-mm-items-range-ratio: 0
+    random-mm-limit-mm-per-prompt: '{"image":3,"video":0}'
+    random-mm-bucket-config: '{(720, 1280, 1): 1.0}'
+  text_720_1280_45:
+    dataset-name: random-mm
+    seed: 45
+    num-prompts: 400
+    random-prefix-len: 100
+    random-input-len: 300
+    random-output-len: 100
+    random-range-ratio: 0.2
+    random-mm-base-items-per-request: 1
+    random-mm-num-mm-items-range-ratio: 0
+    random-mm-limit-mm-per-prompt: '{"image":3,"video":0}'
+    random-mm-bucket-config: '{(720, 1280, 1): 1.0}'
+  text_720_1280_46:
+    dataset-name: random-mm
+    seed: 46
+    num-prompts: 400
+    random-prefix-len: 100
+    random-input-len: 300
+    random-output-len: 100
+    random-range-ratio: 0.2
+    random-mm-base-items-per-request: 1
+    random-mm-num-mm-items-range-ratio: 0
+    random-mm-limit-mm-per-prompt: '{"image":3,"video":0}'
+    random-mm-bucket-config: '{(720, 1280, 1): 1.0}'
+  text_720_1280_47:
+    dataset-name: random-mm
+    seed: 47
+    num-prompts: 400
+    random-prefix-len: 100
+    random-input-len: 300
+    random-output-len: 100
+    random-range-ratio: 0.2
+    random-mm-base-items-per-request: 1
+    random-mm-num-mm-items-range-ratio: 0
+    random-mm-limit-mm-per-prompt: '{"image":3,"video":0}'
+    random-mm-bucket-config: '{(720, 1280, 1): 1.0}'
+  text_720_1280_48:
+    dataset-name: random-mm
+    seed: 48
+    num-prompts: 400
+    random-prefix-len: 100
+    random-input-len: 300
+    random-output-len: 100
+    random-range-ratio: 0.2
+    random-mm-base-items-per-request: 1
+    random-mm-num-mm-items-range-ratio: 0
+    random-mm-limit-mm-per-prompt: '{"image":3,"video":0}'
+    random-mm-bucket-config: '{(720, 1280, 1): 1.0}'
+  text_720_1280_49:
+    dataset-name: random-mm
+    seed: 49
+    num-prompts: 400
+    random-prefix-len: 100
+    random-input-len: 300
+    random-output-len: 100
+    random-range-ratio: 0.2
+    random-mm-base-items-per-request: 1
+    random-mm-num-mm-items-range-ratio: 0
+    random-mm-limit-mm-per-prompt: '{"image":3,"video":0}'
+    random-mm-bucket-config: '{(720, 1280, 1): 1.0}'
+  text_720_1280_50:
+    dataset-name: random-mm
+    seed: 50
+    num-prompts: 400
+    random-prefix-len: 100
+    random-input-len: 300
+    random-output-len: 100
+    random-range-ratio: 0.2
+    random-mm-base-items-per-request: 1
+    random-mm-num-mm-items-range-ratio: 0
+    random-mm-limit-mm-per-prompt: '{"image":3,"video":0}'
+    random-mm-bucket-config: '{(720, 1280, 1): 1.0}'
+  text_720_1280_51:
+    dataset-name: random-mm
+    seed: 51
+    num-prompts: 400
+    random-prefix-len: 100
+    random-input-len: 300
+    random-output-len: 100
+    random-range-ratio: 0.2
+    random-mm-base-items-per-request: 1
+    random-mm-num-mm-items-range-ratio: 0
+    random-mm-limit-mm-per-prompt: '{"image":3,"video":0}'
+    random-mm-bucket-config: '{(720, 1280, 1): 1.0}'
+experiments:
+  - name: c8
+    dataset: text_720_1280_43
+    args:
+      max-concurrency: 8
+      request-rate: inf
+      ignore-eos: true
+
+  - name: c10
+    dataset: text_720_1280_44
+    args:
+      max-concurrency: 10
+      request-rate: inf
+      ignore-eos: true
+
+  - name: c12
+    dataset: text_720_1280_45
+    args:
+      max-concurrency: 12
+      request-rate: inf
+      ignore-eos: true
+
+
+  - name: c14
+    dataset: text_720_1280_46
+    args:
+      max-concurrency: 14
+      request-rate: inf
+      ignore-eos: true
+
+  - name: c16
+    dataset: text_720_1280_47
+    args:
+      max-concurrency: 16
+      request-rate: inf
+      ignore-eos: true
+
+  - name: c18
+    dataset: text_720_1280_48
+    args:
+      max-concurrency: 18
+      request-rate: inf
+      ignore-eos: true
+
+  - name: c22
+    dataset: text_720_1280_49
+    args:
+      max-concurrency: 22
+      request-rate: inf
+      ignore-eos: true
+
+  - name: c25
+    dataset: text_720_1280_50
+    args:
+      max-concurrency: 25
+      request-rate: inf
+      ignore-eos: true
+
+  - name: c30
+    dataset: text_720_1280_51
+    args:
+      max-concurrency: 30
+      request-rate: inf
+      ignore-eos: true
