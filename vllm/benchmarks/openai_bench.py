@@ -998,6 +998,27 @@ python3 benchmarks/openai_bench.py \
   --result-dir results/openai_bench/random_mm_test/
 """
 
+# detailed metrics + e2el percentile metrics (v0.91)
+"""
+python3 benchmarks/openai_bench.py \
+  --config-yaml benchmarks/experiments/max_concurrency_091.yaml \
+  --percentile-metrics e2el \
+  --metric-percentiles 0,25,50,75,95,100 \
+  --save-result --save-detailed \
+  --label openai_bench \
+  --result-dir results/openai_bench/vllm091/
+"""
+
+"""
+python3 benchmarks/openai_bench.py \
+  --config-yaml benchmarks/experiments/max_concurrency_01011.yaml \
+  --percentile-metrics e2el \
+  --metric-percentiles 0,25,50,75,95,100 \
+  --save-result --save-detailed \
+  --label openai_bench \
+  --result-dir results/openai_bench/vllm01011/
+"""
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

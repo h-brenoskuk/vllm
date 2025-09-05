@@ -1,0 +1,117 @@
+api:
+  endpoint-type: openai-chat
+  backend: openai
+  base-url: http://localhost:8000
+  endpoint: /v1/chat/completions
+  logprobs: null
+
+engine:
+  model: "qwen2-5-vl-7b-vllm-v091"
+  tokenizer: Qwen/Qwen2.5-VL-7B-Instruct
+  tensor-parallel-size: 1
+  pipeline-parallel-size: 1
+  dtype: bfloat16
+  gpu-memory-utilization: 0.9
+  max-model-len: 16384
+  limit-mm-per-prompt: '{"image":3,"video":0}'
+  mm-processor-kwargs: '{"max_pixels":1003520}'
+  guided-decoding-backend: xgrammar
+  enable-prefix-caching: false
+  tokenizer-mode: auto
+  trust-remote-code: false
+
+#screenspot_hf_v1 info
+#+-------------------------------------------------------------------------------------+
+#|                      Total Requests: 1272 | Total Images: 1272                      |
+#+-----------------------+-------+---------+--------+--------+--------+-------+--------+
+#| Metric                | Count |    Mean |    Std | Median |    P95 |   Min |    Max |
+#+-----------------------+-------+---------+--------+--------+--------+-------+--------+
+#| Images / request      |  1272 |     1.0 |    0.0 |    1.0 |    1.0 |   1.0 |    1.0 |
+#| Prompt length (chars) |  1272 |  196.32 |   9.15 |  195.0 |  214.0 | 178.0 |  249.0 |
+#| Image width (px)      |  1272 | 1718.62 | 704.43 | 1324.0 | 2560.0 | 362.0 | 3024.0 |
+#| Image height (px)     |  1272 | 1677.07 | 642.46 | 1440.0 | 2532.0 | 313.0 | 2532.0 |
+#| Input tokens          |  1272 |   81.79 |    2.0 |   81.0 |   86.0 |  79.0 |   95.0 |
+#+-----------------------+-------+---------+--------+--------+--------+-------+--------+
+#+----------------------------------------------------------------+
+#|             Top 10 Image Resolutions | Unique: 96              |
+#+------------------+-------+---------+---------------------------+
+#| Resolution (WxH) | Count | Percent | Mean request input tokens |
+#+------------------+-------+---------+---------------------------+
+#| 2560x1440        |   436 |  34.28% |                     82.53 |
+#| 1080x2400        |   247 |  19.42% |                     81.28 |
+#| 1170x2532        |   195 |  15.33% |                     81.58 |
+#| 960x540          |   110 |   8.65% |                     81.27 |
+#| 2360x1640        |    60 |   4.72% |                     81.38 |
+#| 3024x1964        |     7 |   0.55% |                     79.71 |
+#| 1920x1080        |     6 |   0.47% |                     81.83 |
+#| 1338x1362        |     5 |   0.39% |                      81.8 |
+#| 1196x927         |     4 |   0.31% |                      80.5 |
+#| 839x638          |     4 |   0.31% |                     80.75 |
+#+------------------+-------+---------+---------------------------+
+
+datasets:
+  text_screenspot_sizes:
+    dataset-name: random-mm
+    seed: 42
+    num-prompts: 1272
+    random-prefix-len: 0
+    random-input-len: 85
+    random-output-len: 80
+    random-range-ratio: 0.2
+    random-mm-base-items-per-request: 1
+    random-mm-num-mm-items-range-ratio: 0
+    random-mm-limit-mm-per-prompt: '{"image":3,"video":0}'
+    random-mm-bucket-config: '{(2560, 1440, 1): 0.436, (1080, 2400, 1): 0.1942, (1170, 2532, 1): 0.1533, (960, 540, 1): 0.0865, (2360, 1640, 1): 0.0472, (3024, 1964, 1): 0.0055, (1338, 1362, 1): 0.0039, (1196, 927, 1): 0.0031, (839, 638, 1): 0.0031}'
+
+
+experiments:
+  - name: c8
+    dataset: text_screenspot_sizes
+    args:
+      max-concurrency: 8
+      request-rate: inf
+      ignore-eos: true
+
+  - name: c10
+    dataset: text_screenspot_sizes
+    args:
+      max-concurrency: 10
+      request-rate: inf
+      ignore-eos: true
+
+  - name: c12
+    dataset: text_screenspot_sizes
+    args:
+      max-concurrency: 12
+      request-rate: inf
+      ignore-eos: true
+
+
+  - name: c14
+    dataset: text_screenspot_sizes
+    args:
+      max-concurrency: 14
+      request-rate: inf
+      ignore-eos: true
+
+  - name: c16
+    dataset: text_screenspot_sizes
+    args:
+      max-concurrency: 16
+      request-rate: inf
+      ignore-eos: true
+
+  - name: c18
+    dataset: text_screenspot_sizes
+    args:
+      max-concurrency: 18
+      request-rate: inf
+      ignore-eos: true
+
+  - name: c22
+    dataset: text_screenspot_sizes
+    args:
+      max-concurrency: 22
+      request-rate: inf
+      ignore-eos: true
+
